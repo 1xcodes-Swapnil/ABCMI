@@ -1,0 +1,82 @@
+{
+  "report_id": "e1631783-0efa-40fb-879d-ffae5b6308e9",
+  "meeting_id": "23abc7bd-4425-42c7-b45f-74c8d82687e9",
+  "tenant_id": "default-tenant",
+  "report_type": "comprehensive",
+  "generated_at": "2026-08-24T11:15:06.758600+00:00",
+  "version": 1,
+  "sections": [
+    {
+      "title": "Meeting Metadata",
+      "content": "Title: Project Strategy Kickoff\nStatus: completed\nScheduled: None\nDuration: 60 mins\nTimezone: UTC",
+      "confidence": 1.0,
+      "verification_status": "verified",
+      "metadata": {
+        "language": "en"
+      }
+    },
+    {
+      "title": "Participants",
+      "content": "[]",
+      "confidence": 1.0,
+      "verification_status": "verified",
+      "metadata": {
+        "count": 0
+      }
+    },
+    {
+      "title": "Topics Discussed",
+      "content": "[]",
+      "confidence": 1.0,
+      "verification_status": "authoritative",
+      "metadata": {
+        "count": 0
+      }
+    },
+    {
+      "title": "Key Decisions",
+      "content": "[]",
+      "confidence": 1.0,
+      "verification_status": "verified",
+      "metadata": {
+        "count": 0
+      }
+    },
+    {
+      "title": "Action Items",
+      "content": "[]",
+      "confidence": 1.0,
+      "verification_status": "authoritative",
+      "metadata": {
+        "count": 0
+      }
+    },
+    {
+      "title": "Verified Facts & Hypotheses",
+      "content": "{\n  \"facts\": [],\n  \"hypotheses\": []\n}",
+      "confidence": 1.0,
+      "verification_status": "mixed",
+      "metadata": {
+        "facts_count": 0,
+        "hypotheses_count": 0
+      }
+    },
+    {
+      "title": "Transcript Insights & Speaker Analytics",
+      "content": "[]",
+      "confidence": 1.0,
+      "verification_status": "derived",
+      "metadata": {
+        "insights_count": 0,
+        "speaker_analytics_enabled": true
+      }
+    }
+  ],
+  "provenance": {
+    "source": "Authoritative SKW Blackboard",
+    "knowledge_objects_count": 0,
+    "average_confidence": 1.0,
+    "request_id": "eec05544-6319-4ee4-8d1d-30a8b9c2d83e",
+    "correlation_id": "3a042d1b-9112-4217-a74c-2d45e81492b0"
+  }
+}

@@ -1,0 +1,82 @@
+{
+  "report_id": "357eebc5-6ea0-46e3-82dc-fdb1fe5618ac",
+  "meeting_id": "2395857a-d35f-462d-b54c-d76cdb91f969",
+  "tenant_id": "default-tenant",
+  "report_type": "comprehensive",
+  "generated_at": "2026-08-24T11:16:02.672008+00:00",
+  "version": 1,
+  "sections": [
+    {
+      "title": "Meeting Metadata",
+      "content": "Title: sample_meeting.wav\nStatus: completed\nScheduled: None\nDuration: 60 mins\nTimezone: UTC",
+      "confidence": 1.0,
+      "verification_status": "verified",
+      "metadata": {
+        "language": "en"
+      }
+    },
+    {
+      "title": "Participants",
+      "content": "[]",
+      "confidence": 1.0,
+      "verification_status": "verified",
+      "metadata": {
+        "count": 0
+      }
+    },
+    {
+      "title": "Topics Discussed",
+      "content": "[]",
+      "confidence": 1.0,
+      "verification_status": "authoritative",
+      "metadata": {
+        "count": 0
+      }
+    },
+    {
+      "title": "Key Decisions",
+      "content": "[]",
+      "confidence": 1.0,
+      "verification_status": "verified",
+      "metadata": {
+        "count": 0
+      }
+    },
+    {
+      "title": "Action Items",
+      "content": "[]",
+      "confidence": 1.0,
+      "verification_status": "authoritative",
+      "metadata": {
+        "count": 0
+      }
+    },
+    {
+      "title": "Verified Facts & Hypotheses",
+      "content": "{\n  \"facts\": [],\n  \"hypotheses\": []\n}",
+      "confidence": 1.0,
+      "verification_status": "mixed",
+      "metadata": {
+        "facts_count": 0,
+        "hypotheses_count": 0
+      }
+    },
+    {
+      "title": "Transcript Insights & Speaker Analytics",
+      "content": "[]",
+      "confidence": 1.0,
+      "verification_status": "derived",
+      "metadata": {
+        "insights_count": 0,
+        "speaker_analytics_enabled": true
+      }
+    }
+  ],
+  "provenance": {
+    "source": "Authoritative SKW Blackboard",
+    "knowledge_objects_count": 0,
+    "average_confidence": 1.0,
+    "request_id": "1cf4c495-b2e3-4cbb-859d-1667c5743934",
+    "correlation_id": "630a87b0-d4e5-4282-b535-664cedf8aa95"
+  }
+}
