@@ -1,0 +1,83 @@
+{
+  "verification_metadata": {
+    "framework": "ABCI-MI",
+    "version": "1.0.0",
+    "phase": "Phase 4.26 (OpenMOSS + PyAnnote + Long Audio Chunking)",
+    "timestamp": "2026-09-10T17:05:00Z",
+    "environment": {
+      "execution_mode_configured": "REAL",
+      "cuda_available": false,
+      "gpu_hardware": null,
+      "device_target": "cuda",
+      "openmoss_model_id": "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+      "pyannote_pipeline_id": "pyannote/speaker-diarization-3.1",
+      "hf_token_configured": true,
+      "redis_status": "FALLBACK"
+    }
+  },
+  "verification_results": {
+    "real_environment_check": {
+      "status": "BLOCKED",
+      "reason": "Host container lacks dedicated NVIDIA GPU hardware (CUDA unavailable); strict REAL mode prohibits silent fallback to CPU/Mock.",
+      "classification": "BLOCKED"
+    },
+    "real_moss_smoke_test": {
+      "status": "BLOCKED",
+      "reason": "Open-MOSS multi-gigabyte weights require CUDA runtime acceleration or local cached model in container.",
+      "classification": "BLOCKED"
+    },
+    "real_pyannote_test": {
+      "status": "BLOCKED",
+      "reason": "PyAnnote 3.1 requires active Hugging Face user license agreement acceptance on gated repositories (pyannote/speaker-diarization-3.1 and pyannote/segmentation-3.0) and CUDA environment.",
+      "classification": "BLOCKED"
+    },
+    "long_meeting_processing": {
+      "target_file": "BIVA.Act(Sneha,Om,Neetigya).mp3",
+      "file_present_on_disk": false,
+      "status": "FAILED",
+      "cli_exit_code": 1,
+      "error_message": "File not found: BIVA.Act(Sneha,Om,Neetigya).mp3",
+      "classification": "FAILED"
+    },
+    "pipeline_components": {
+      "automatic_chunking": {
+        "status": "UNIT VERIFIED",
+        "description": "Validated chunk planning with 600s duration and 30s overlap across arbitrary length audio."
+      },
+      "overlap_handling_and_deduplication": {
+        "status": "UNIT VERIFIED",
+        "description": "Validated boundary deduplication using Levenshtein distance matching and cross-chunk segment stitching."
+      },
+      "global_timestamps": {
+        "status": "UNIT VERIFIED",
+        "description": "Validated mathematical offset conversion from local chunk offsets to global meeting timeline."
+      },
+      "speaker_reconciliation": {
+        "status": "UNIT VERIFIED",
+        "description": "Validated speaker embedding and string overlap reconciliation across chunk boundaries."
+      },
+      "cli_failure_exit_code": {
+        "status": "UNIT VERIFIED",
+        "description": "Validated that failed file or pipeline execution returns a non-zero exit code (1)."
+      }
+    }
+  },
+  "execution_metrics": {
+    "audio_duration": "0s (File not found)",
+    "chunks": 0,
+    "successful_chunks": 0,
+    "failed_chunks": 0,
+    "retries": 0,
+    "final_segments": 0,
+    "speakers": 0,
+    "processing_time": "0.00s",
+    "rtf": "N/A",
+    "moss": "FAIL",
+    "pyannote": "FAIL",
+    "chunk_reconstruction": "FAIL",
+    "timestamp_validation": "FAIL",
+    "speaker_reconciliation": "FAIL",
+    "redis": "FALLBACK",
+    "final_status": "BLOCKED"
+  }
+}

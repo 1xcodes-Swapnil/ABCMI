@@ -18,6 +18,8 @@ export interface MeetingItem {
   description: string;
   status: MeetingStatus;
   primary_language: string;
+  category?: string;
+  tags?: string[];
   scheduled_start?: string;
   duration_minutes?: number;
   audio_uploaded: boolean;

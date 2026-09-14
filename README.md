@@ -100,25 +100,100 @@ ABCI-MI is an enterprise-grade meeting intelligence, multilingual transcription,
 
 ---
 
-## CLI Testing Harness (`backend.cli`)
+## System Flow & Data Lifecycle Architecture (`flow.md`)
 
-A dedicated CLI testing interface is available for local pipeline verification, developer debugging, and offline transcript processing:
+For a comprehensive, step-by-step breakdown of how data flows through chunk windowing, acoustic inference, Sarvam-1 Indic normalization, the Adaptive Blackboard Engine (ACE), vector memory, and downstream delivery, see:
+👉 **[Complete Data Flow Architecture (`flow.md`)](flow.md)**
+
+---
+
+## Phase 4.26 Long Audio Chunking & CLI Verification Harness (`backend.cli`)
+
+A dedicated CLI testing interface is available for local pipeline verification, developer debugging, offline transcript processing, and **Phase 4.26 Real AI inference verification**:
 
 ```bash
 # Display CLI help and options
-python -m backend.cli --help
+python3 backend/cli.py --help
+
+# Phase 4.26: Verify 7-point REAL-mode environment and model prerequisites
+python3 backend/cli.py meeting check-real-mode
+
+# Phase 4.26: Process audio file in strict REAL inference mode (zero-fallback)
+python3 backend/cli.py meeting process-real ./data/audio/raw/meeting.wav
 
 # Process a local meeting audio file and generate Markdown report:
-python -m backend.cli --file ./data/audio/raw/sample_meeting.wav --title "Engineering Sync" --export-format markdown
+python3 backend/cli.py --file ./data/audio/raw/sample_meeting.wav --title "Engineering Sync" --export-format markdown
 
 # Ingest with target language translation:
-python -m backend.cli --file ./data/meeting.mp3 --title "Global All-Hands" --translate es --export-format pdf
+python3 backend/cli.py --file ./data/meeting.mp3 --title "Global All-Hands" --translate es --export-format pdf
 
 # Ask natural language questions against a processed meeting:
-python -m backend.cli --meeting-id 7a4cb6f8-2c52-4023-ad32-53b9a3bad142 --query "What were the key decisions made?"
+python3 backend/cli.py --meeting-id 7a4cb6f8-2c52-4023-ad32-53b9a3bad142 --query "What were the key decisions made?"
 
 # Launch interactive terminal testing console:
-python -m backend.cli --interactive
+python3 backend/cli.py --interactive
+```
+
+---
+
+## Google Cloud Run Deployment & Production Hardening
+
+Deploy the ABCI-MI application container to Google Cloud Run with Secret Manager and security boundaries.
+
+### 1. Environment & Prerequisites
+Ensure necessary Google Cloud APIs (Cloud Run, Secret Manager, Cloud Build) are enabled:
+```bash
+gcloud services enable run.googleapis.com secretmanager.googleapis.com cloudbuild.googleapis.com
+```
+
+### 2. Google Cloud Secret Manager Bindings
+Create and populate runtime secrets without baking credentials into images or repositories:
+```bash
+# Create and populate the Gemini API secret
+gcloud secrets create GEMINI_API_KEY --replication-policy="automatic"
+echo -n "YOUR_API_KEY" | gcloud secrets versions add GEMINI_API_KEY --data-file=-
+
+# Grant default Cloud Run runtime service account access to read the secret
+gcloud secrets add-iam-policy-binding GEMINI_API_KEY \
+  --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+### 3. Cloud Firestore Security Rules (User Data Isolation)
+When utilizing Cloud Firestore, enforce owner-bound isolation:
+```javascript
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId}/interactions/{interactionId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}
+```
+
+### 4. Cloud Run Deployment Flow
+Build and deploy the application container:
+```bash
+# Build and submit the container image
+gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/abci-mi:latest .
+
+# Deploy container service to Cloud Run
+gcloud run deploy abci-mi \
+  --image gcr.io/YOUR_PROJECT_ID/abci-mi:latest \
+  --platform managed \
+  --region asia-southeast1 \
+  --allow-unauthenticated \
+  --port 3000 \
+  --set-secrets=GEMINI_API_KEY=GEMINI_API_KEY:latest
+```
+
+### 5. Required Campaign Labeling (Verification Binding)
+Apply the mandatory resource label to register the Cloud Run service for automated verification:
+```bash
+gcloud run services update abci-mi \
+  --update-labels=dev-tutorial=cloud-run-ai-challenge \
+  --region=asia-southeast1
 ```
 
 ---
@@ -148,7 +223,8 @@ npm run dev
 
 ## Comprehensive Documentation Index
 
-All architectural guidelines and technical specifications are maintained in the `/docs` directory:
+All architectural guidelines and technical specifications are maintained in the repository:
+- **[System & Data Flow Architecture (`flow.md`)](flow.md)** *(Authoritative lifecycle & pipeline diagrams)*
 - [System Architecture Specification](docs/ARCHITECTURE.md)
 - [Models & Algorithms Specification (How, Where, Why, What, When)](docs/MODELS_AND_ALGORITHMS.md)
 - [Architectural Decision Records (ADRs)](docs/DECISIONS.md)

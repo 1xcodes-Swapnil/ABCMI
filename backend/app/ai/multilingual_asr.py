@@ -120,6 +120,11 @@ class ASRProvider(ABC):
 class OpenMOSSProvider(ASRProvider):
     """Concrete ASR Provider using Open-MOSS (MOSS-Transcribe-Diarize)."""
     
+    # Class-level model cache to guarantee MOSS is loaded once per provider/process
+    _cached_model = None
+    _cached_processor = None
+    _cached_model_key = None
+
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
         self.model_id = self.config.get("model_id", "OpenMOSS-Team/MOSS-Transcribe-Diarize")
@@ -130,27 +135,42 @@ class OpenMOSSProvider(ASRProvider):
         self.processor = None
 
     def _load_model(self):
-        if self.model is not None:
+        """Loads MOSS weights and processor once per provider instance / process."""
+        if self.model is not None and self.processor is not None:
             return
-            
+
+        cache_key = f"{self.model_id}:{self.device}"
+        if OpenMOSSProvider._cached_model_key == cache_key and OpenMOSSProvider._cached_model is not None:
+            self.model = OpenMOSSProvider._cached_model
+            self.processor = OpenMOSSProvider._cached_processor
+            logger.info("REAL MODEL LOADED: Reusing cached Open-MOSS (%s on %s)", self.model_id, self.device)
+            return
+
         import torch
         from transformers import AutoModelForCausalLM, AutoProcessor
         
         try:
+            logger.info("Loading Open-MOSS processor and weights for '%s' on device '%s'...", self.model_id, self.device)
             self.processor = AutoProcessor.from_pretrained(
                 self.model_id,
                 trust_remote_code=True,
                 cache_dir=self.cache_dir,
                 token=self.token,
             )
+            device_target = self.device if self.device != "auto" else "auto"
+            torch_dtype = torch.float16 if (self.device == "cuda" and torch.cuda.is_available()) else torch.float32
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_id,
                 trust_remote_code=True,
                 cache_dir=self.cache_dir,
                 token=self.token,
-                device_map=self.device if self.device != "auto" else "auto",
-                torch_dtype=torch.float16 if self.device == "cuda" and torch.cuda.is_available() else torch.float32,
+                device_map=device_target,
+                torch_dtype=torch_dtype,
             )
+            OpenMOSSProvider._cached_model = self.model
+            OpenMOSSProvider._cached_processor = self.processor
+            OpenMOSSProvider._cached_model_key = cache_key
+            logger.info("REAL MODEL LOADED: Open-MOSS '%s' successfully loaded on device '%s'", self.model_id, self.device)
         except Exception as ex:
             raise RuntimeError(
                 f"Failed to load Open-MOSS model '{self.model_id}' on device '{self.device}': {ex}"
@@ -177,6 +197,10 @@ class OpenMOSSProvider(ASRProvider):
         self._load_model()
         
         # 3. Perform inference
+        logger.info(
+            "REAL INFERENCE ATTEMPTED: Processing audio file %s with Open-MOSS (%s on %s)",
+            audio_path, self.model_id, self.device
+        )
         try:
             # Load audio using librosa (MOSS-Transcribe-Diarize expects 16kHz)
             y, sr = librosa.load(audio_path, sr=16000)
@@ -187,10 +211,21 @@ class OpenMOSSProvider(ASRProvider):
             ]
             text = self.processor.apply_chat_template(messages, tokenize=False)
             
-            # Process inputs
-            inputs = self.processor(text=text, audios=[y], return_tensors="pt")
+            # Process inputs using official MossTranscribeDiarizeProcessor API
+            # Expected parameter is 'audio' (NOT 'audios')
+            try:
+                inputs = self.processor(text=text, audio=y, return_tensors="pt")
+            except TypeError as te:
+                # Defensive fallback if a variant processor expects 'audios' or list of arrays
+                if "audio" in str(te) or "audios" in str(te):
+                    try:
+                        inputs = self.processor(text=text, audios=[y], return_tensors="pt")
+                    except Exception:
+                        inputs = self.processor(text=text, audio=[y], return_tensors="pt")
+                else:
+                    raise te
             
-            # Move inputs to device
+            # Move inputs to target device
             device_target = "cuda" if (self.device == "cuda" and torch.cuda.is_available()) else "cpu"
             inputs = {k: v.to(device_target) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
             
@@ -205,43 +240,122 @@ class OpenMOSSProvider(ASRProvider):
             # Decode generated output tokens
             prompt_length = inputs["input_ids"].shape[1]
             generated_tokens = outputs[0][prompt_length:]
-            decoded_text = self.processor.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            
+            if hasattr(self.processor, "decode"):
+                decoded_text = self.processor.decode(generated_tokens, skip_special_tokens=True)
+            elif hasattr(self.processor, "tokenizer") and hasattr(self.processor.tokenizer, "decode"):
+                decoded_text = self.processor.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            else:
+                decoded_text = str(generated_tokens)
             
             # Parse decoded_text into ASRSegment formats
-            return self._parse_moss_output(decoded_text)
+            chunk_meta = options.get("chunk_meta") if options else None
+            segments = self._parse_moss_output(decoded_text, chunk_meta=chunk_meta)
+            
+            logger.info(
+                "REAL INFERENCE SUCCEEDED: Extracted %d segments from %s",
+                len(segments), audio_path
+            )
+            return segments
             
         except Exception as ex:
+            logger.error("REAL INFERENCE FAILED: Open-MOSS inference error on %s: %s", audio_path, ex)
             raise RuntimeError(f"Open-MOSS inference failed: {ex}") from ex
 
-    def _parse_moss_output(self, text: str) -> List[ASRSegment]:
+    @staticmethod
+    def _parse_timestamp(ts_str: str) -> float:
+        """Safely parse timestamps formatted as mm:ss.xx, hh:mm:ss.xx, or decimal seconds."""
+        ts = ts_str.strip()
+        if ":" in ts:
+            parts = ts.split(":")
+            if len(parts) == 2:
+                # mm:ss.xx
+                return float(parts[0]) * 60.0 + float(parts[1])
+            elif len(parts) == 3:
+                # hh:mm:ss.xx
+                return float(parts[0]) * 3600.0 + float(parts[1]) * 60.0 + float(parts[2])
+        return float(ts)
+
+    def _parse_moss_output(self, text: str, chunk_meta: Optional[Any] = None) -> List[ASRSegment]:
         """
-        Parses Open-MOSS generated text containing speakers and timestamps.
-        Example format:
-        [00:00.00 -> 00:03.50] [S01]: Welcome to our sync meeting today.
-        [00:03.50 -> 00:07.20] [S02]: Thanks for joining us.
+        Parses Open-MOSS generated text containing speakers, timestamps, and transcripts.
+        Supports canonical MOSS formats:
+          - Canonical: [0.48][S01]Welcome everyone[1.66]
+          - Arrow: [00:00.00 -> 00:03.50] [S01]: Welcome to our sync meeting today.
+          - Seconds-Arrow: [0.00 -> 3.50] [S01]: Welcome to our sync meeting today.
+          - Timestamp token: <|0.00|>[S01] Welcome to our sync meeting today.<|3.50|>
+        Preserves timestamps, speakers, language, confidence, and metadata.
         """
         import re
-        segments = []
-        
-        pattern = r"\[(\d{2}):(\d{2})\.(\d{2})\s*->\s*(\d{2}):(\d{2})\.(\d{2})\]\s*\[([^\]]+)\]:\s*(.*)"
-        
+        segments: List[ASRSegment] = []
+        if not text or not text.strip():
+            return segments
+
+        # 1. Try canonical MOSS format: [start][speaker]transcript[end]
+        canonical_pattern = r"\[([\d\.:]+)\]\s*\[([^\]]+)\]\s*([^\[]+?)\s*\[([\d\.:]+)\]"
+        matches = list(re.finditer(canonical_pattern, text))
+        if matches:
+            for match in matches:
+                start_str, speaker, transcript, end_str = match.groups()
+                transcript = transcript.strip()
+                if not transcript:
+                    continue
+                try:
+                    start_time = self._parse_timestamp(start_str)
+                    end_time = self._parse_timestamp(end_str)
+                except ValueError:
+                    start_time, end_time = 0.0, 0.0
+
+                word_tokens = transcript.split()
+                words = []
+                if len(word_tokens) > 0 and end_time > start_time:
+                    step = (end_time - start_time) / len(word_tokens)
+                    for i, w in enumerate(word_tokens):
+                        words.append(
+                            ASRWordTimestamp(
+                                word=w,
+                                start_time=start_time + i * step,
+                                end_time=start_time + (i + 1) * step,
+                                confidence=0.95,
+                                language_code="en",
+                            )
+                        )
+
+                segments.append(
+                    ASRSegment(
+                        speaker_id=speaker.strip(),
+                        start_time=start_time,
+                        end_time=end_time,
+                        transcript=transcript,
+                        detected_language="en",
+                        words=words,
+                        confidence=0.95,
+                    )
+                )
+            if segments:
+                return segments
+
+        # 2. Try arrow format: [00:00.00 -> 00:03.50] [S01]: transcript
+        arrow_pattern = r"\[([\d\.:]+)\s*->\s*([\d\.:]+)\]\s*\[?([^\]:\n]+)\]?:?\s*(.*)"
         lines = text.split("\n")
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-            match = re.match(pattern, line)
+            match = re.match(arrow_pattern, line)
             if match:
-                sh, sm, ss, eh, em, es, speaker, transcript = match.groups()
-                start_time = float(sh) * 3600 + float(sm) * 60 + float(ss) / 100
-                end_time = float(eh) * 3600 + float(em) * 60 + float(es) / 100
-                
-                # Construct words/sub-elements
+                start_str, end_str, speaker, transcript = match.groups()
+                transcript = transcript.strip()
+                try:
+                    start_time = self._parse_timestamp(start_str)
+                    end_time = self._parse_timestamp(end_str)
+                except ValueError:
+                    start_time, end_time = 0.0, 0.0
+
                 word_tokens = transcript.split()
                 words = []
-                num_words = len(word_tokens)
-                if num_words > 0:
-                    step = (end_time - start_time) / num_words
+                if len(word_tokens) > 0 and end_time > start_time:
+                    step = (end_time - start_time) / len(word_tokens)
                     for i, w in enumerate(word_tokens):
                         words.append(
                             ASRWordTimestamp(
@@ -249,31 +363,31 @@ class OpenMOSSProvider(ASRProvider):
                                 start_time=start_time + i * step,
                                 end_time=start_time + (i + 1) * step,
                                 confidence=0.92,
-                                language_code="en"
+                                language_code="en",
                             )
                         )
-                
+
                 segments.append(
                     ASRSegment(
-                        speaker_id=speaker,
+                        speaker_id=speaker.strip(),
                         start_time=start_time,
                         end_time=end_time,
                         transcript=transcript,
                         detected_language="en",
                         words=words,
-                        confidence=0.95
+                        confidence=0.95,
                     )
                 )
             else:
-                # Fallback parser
+                # Fallback for plain lines
                 segments.append(
                     ASRSegment(
-                        speaker_id="speaker_unknown",
+                        speaker_id="SPEAKER_UNKNOWN",
                         start_time=0.0,
                         end_time=5.0,
                         transcript=line,
                         detected_language="en",
-                        confidence=0.85
+                        confidence=0.85,
                     )
                 )
         return segments
@@ -647,15 +761,21 @@ class MultilingualASREngine:
             overlap_duration=overlap_duration,
         )
 
+        # Initialize OpenMOSSProvider once per long-audio run in REAL mode
+        real_provider: Optional[OpenMOSSProvider] = None
+        if exec_mode == "REAL" and not use_fixture:
+            real_provider = OpenMOSSProvider({
+                "model_id": settings.OPENMOSS_MODEL_ID,
+                "device": settings.OPENMOSS_DEVICE,
+                "cache_dir": settings.OPENMOSS_CACHE_DIR,
+                "token": settings.HF_TOKEN,
+            })
+
         async def _transcribe_chunk(chunk_path: str, chunk_meta: ChunkMetadata) -> List[ASRSegment]:
             if exec_mode == "REAL" and not use_fixture:
-                provider = OpenMOSSProvider({
-                    "model_id": settings.OPENMOSS_MODEL_ID,
-                    "device": settings.OPENMOSS_DEVICE,
-                    "cache_dir": settings.OPENMOSS_CACHE_DIR,
-                    "token": settings.HF_TOKEN,
-                })
-                return await provider.transcribe(chunk_path)
+                if real_provider is None:
+                    raise RuntimeError("REAL mode requested but OpenMOSSProvider was not initialized.")
+                return await real_provider.transcribe(chunk_path, options={"chunk_meta": chunk_meta})
             else:
                 # Simulated chunk transcription for fixture/test mode
                 # Generate realistic turns within this chunk's local timeline [0, chunk_meta.duration]

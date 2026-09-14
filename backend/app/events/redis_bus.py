@@ -46,11 +46,17 @@ class RedisEventBus:
         self._pubsub_task: Optional[Any] = None
         self._is_connected: bool = False
         self._has_logged_prod_warning: bool = False
+        self._has_logged_fallback: bool = False
 
     @property
     def is_distributed(self) -> bool:
         """Returns True if the event bus has an active connection to distributed Redis."""
         return self._is_connected
+
+    @property
+    def status_report(self) -> str:
+        """Reports AVAILABLE or FALLBACK for diagnostics and health monitoring."""
+        return "AVAILABLE" if self._is_connected else "FALLBACK"
 
     async def _get_client(self) -> Optional[aioredis.Redis]:
         """Obtain active Redis async client instance safely."""
@@ -63,6 +69,9 @@ class RedisEventBus:
                 self._is_connected = True
                 return client
             self._is_connected = False
+            if not self._has_logged_fallback:
+                logger.warning("REDIS FALLBACK: Redis client not configured or unreachable. Operating in local in-process fallback mode.")
+                self._has_logged_fallback = True
             return None
         except Exception as e:
             self._is_connected = False
@@ -74,8 +83,11 @@ class RedisEventBus:
                     "Events will NOT be distributed across multiple container / worker processes until Redis is available."
                 )
                 self._has_logged_prod_warning = True
+            elif not self._has_logged_fallback:
+                logger.warning(f"REDIS FALLBACK: Could not connect to Redis for EventBus ({e}). Operating in local in-process fallback mode.")
+                self._has_logged_fallback = True
             else:
-                logger.warning(f"Could not connect to Redis for EventBus: {e}. Operating in local fallback.")
+                logger.debug(f"Redis connection retry failed: {e}. Continuing in local fallback mode.")
             return None
 
     def _ensure_stable_event_id(self, event: Union[CoreBaseModel, Dict[str, Any], str]) -> Union[CoreBaseModel, Dict[str, Any], str]:

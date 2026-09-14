@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Users,
   Radio,
@@ -21,7 +21,8 @@ import {
   Cpu,
   Workflow,
   PanelLeftClose,
-  PanelLeftOpen
+  PanelLeftOpen,
+  Command
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -45,6 +46,8 @@ import {
   ALL_API_ENDPOINTS
 } from './data/mockData';
 import { Header } from './components/Header';
+import { SystemStatusBar } from './components/SystemStatusBar';
+import { CommandPalette } from './components/CommandPalette';
 import { MeetingsTester } from './components/MeetingsTester';
 import { LiveStreamTester } from './components/LiveStreamTester';
 import { IntelligenceViewer } from './components/IntelligenceViewer';
@@ -55,7 +58,6 @@ import { ReportTester } from './components/ReportTester';
 import { AdminAuditTester } from './components/AdminAuditTester';
 import { ApiConsoleTester } from './components/ApiConsoleTester';
 import { ResearchBenchmarkViewer } from './components/ResearchBenchmarkViewer';
-import { TechInfoTooltip } from './components/TechInfoTooltip';
 
 export default function App() {
   // State Management
@@ -65,6 +67,7 @@ export default function App() {
   >('meetings');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
 
   const [auth, setAuth] = useState<AuthContext>({
     token: 'jwt-hs256-mock-token-sample',
@@ -88,26 +91,90 @@ export default function App() {
   const selectedMeeting = meetings.find(m => m.id === selectedMeetingId) || meetings[0];
   const activeIntelligence = intelligenceMap[selectedMeetingId];
 
+  // Global Keyboard shortcut for Command Palette
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setIsCommandPaletteOpen(prev => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // Helper: Append Audit Log
+  const addAuditLog = (
+    action: string,
+    resourceType: string,
+    resourceId: string,
+    status: 'SUCCESS' | 'FAILED' | 'DENIED',
+    metadata?: string
+  ) => {
+    const newLog: AuditLogItem = {
+      id: `log-${Date.now().toString(36)}`,
+      timestamp: new Date().toISOString(),
+      user_id: auth.user_id,
+      user_email: auth.user_email,
+      action,
+      resource_type: resourceType,
+      resource_id: resourceId,
+      status,
+      ip_address: '127.0.0.1',
+      sanitized_payload: metadata || '{}'
+    };
+    setAuditLogs(prev => [newLog, ...prev]);
+  };
+
   // Handler: Create Meeting
-  const handleCreateMeeting = (title: string, description: string, language: string) => {
+  const handleCreateMeeting = (
+    title: string,
+    description: string,
+    language: string,
+    details?: {
+      category?: string;
+      tags?: string[];
+      participants?: string[];
+      duration_minutes?: number;
+      scheduled_start?: string;
+      audio_file?: File;
+      auto_process?: boolean;
+    }
+  ) => {
     const newId = `meet-${Math.random().toString(36).substring(2, 9)}-${Date.now().toString(36)}`;
+    const hasAudio = !!details?.audio_file;
     const newMeeting: MeetingItem = {
       id: newId,
       title,
       description,
       status: 'created',
       primary_language: language,
-      audio_uploaded: false,
-      participants: [auth.user_name],
+      category: details?.category || 'Architecture & Engineering',
+      tags: details?.tags || ['Multilingual', 'Open-MOSS'],
+      scheduled_start: details?.scheduled_start || new Date().toISOString(),
+      duration_minutes: details?.duration_minutes || (hasAudio ? 45 : 30),
+      audio_uploaded: hasAudio,
+      audio_file_name: details?.audio_file?.name,
+      audio_file_size_mb: details?.audio_file
+        ? parseFloat((details.audio_file.size / (1024 * 1024)).toFixed(2))
+        : undefined,
+      participants:
+        details?.participants && details.participants.length > 0
+          ? details.participants
+          : [auth.user_name, 'Dr. Aris (Audio Lead)', 'Kiran (ML Ops)'],
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     };
 
-    setMeetings([newMeeting, ...meetings]);
+    setMeetings(prev => [newMeeting, ...prev]);
     setSelectedMeetingId(newId);
+    addAuditLog('MEETING_CREATE', 'meeting', newId, 'SUCCESS', JSON.stringify({ title, language, has_audio: hasAudio }));
 
-    // Audit log entry
-    addAuditLog('MEETING_CREATE', 'meeting', newId, 'SUCCESS', JSON.stringify({ title, language }));
+    if (details?.auto_process && hasAudio) {
+      setTimeout(() => {
+        handleProcessMeeting(newId);
+      }, 400);
+    }
   };
 
   // Handler: Upload Audio
@@ -140,13 +207,12 @@ export default function App() {
         prev.map(m => (m.id === meetingId ? { ...m, status: 'completed' } : m))
       );
 
-      // Generate or refresh intelligence
       const targetMeeting = meetings.find(m => m.id === meetingId);
       const generatedIntel: MeetingIntelligence = {
         meeting_id: meetingId,
-        executive_summary: `Synthesized intelligence for "${targetMeeting?.title || 'Session'}". The team coordinated multi-agent hypotheses, reached key consensus items, and outlined action priorities.`,
+        executive_summary: `Executive summary for "${targetMeeting?.title}": Multi-agent synthesis completed across Open-MOSS acoustic diarization, speaker attribution, and semantic entity linking.`,
         key_takeaways: [
-          'High confidence consensus reached across all principal agenda milestones.',
+          'High-confidence speaker diarization achieved via Open-MOSS primary engine.',
           'Action item assignments verified with assigned deadlines and owners.',
           'Cross-meeting canonical Knowledge Objects indexed into vector warehouse.'
         ],
@@ -207,7 +273,7 @@ export default function App() {
     const newQuery: GroundedQuery = {
       id: `q-${Date.now().toString(36)}`,
       query_text: queryText,
-      answer_text: `Based on the authorized meeting transcripts and canonical knowledge objects, the analysis reveals that ${queryText.toLowerCase().replace('?', '')} was thoroughly discussed and verified with high multi-agent consensus.`,
+      answer_text: `Based on authorized meeting transcripts and canonical knowledge objects, the analysis reveals that "${queryText.replace('?', '')}" was verified with high multi-agent consensus across the ACE Blackboard.`,
       confidence: 0.95,
       status: 'grounded',
       citations: [
@@ -237,7 +303,7 @@ export default function App() {
     }> = {
       hi: {
         name: 'Hindi (हिन्दी)',
-        summary: 'टीम ने झाड़-फूंक और अपराध सांख्यिकी पर झांकी बनाई और 10 चार्ट्स के साथ 3 डैशबोर्ड सफलतापूर्वक तैयार किए।',
+        summary: 'टीम ने अपराध सांख्यिकी पर झांकी बनाई और 10 चार्ट्स के साथ 3 डैशबोर्ड सफलतापूर्वक तैयार किए।',
         decisions: ['पर्यटन के बजाय अपराध डेटासेट का चयन किया गया।', '3 प्रवृत्ति पत्रक और 3 क्षेत्रीय दृश्य बनाने का निर्णय लिया गया।'],
         actions: ['सभी वर्कशीट्स को उच्च रिज़ॉल्यूशन PNG में निर्यात करें।', 'वर्ड रिपोर्ट तैयार करें।']
       },
@@ -351,49 +417,26 @@ export default function App() {
       }
     };
 
-    const target = localeLookup[langCode] || {
-      name: langCode.toUpperCase(),
-      summary: `[${langCode.toUpperCase()}] Synthesized meeting summary representation: All key architectural and deliverable milestones reviewed with verified high confidence.`,
-      decisions: [`[${langCode.toUpperCase()}] Strategic decision approved with full consensus.`],
-      actions: [`[${langCode.toUpperCase()}] Task assigned for deliverables compliance.`]
-    };
-
-    const newTrans: TranslationItem = {
-      id: `tr-${langCode}-${Date.now()}`,
+    const targetLocale = localeLookup[langCode] || localeLookup['en'];
+    const newTranslation: TranslationItem = {
+      id: `trans-${Date.now().toString(36)}`,
       meeting_id: meetingId,
       language_code: langCode,
-      language_name: target.name,
-      translated_summary: target.summary,
-      translated_decisions: target.decisions,
-      translated_action_items: target.actions,
+      language_name: targetLocale.name,
+      translated_summary: targetLocale.summary,
+      translated_decisions: targetLocale.decisions,
+      translated_action_items: targetLocale.actions,
       created_at: new Date().toISOString()
     };
 
-    setTranslations([newTrans, ...translations]);
-    addAuditLog('TRANSLATION_SYNTHESIZE', 'derived_translation', newTrans.id, 'SUCCESS', JSON.stringify({ lang: langCode, locale_name: target.name }));
+    setTranslations(prev => [newTranslation, ...prev]);
+    addAuditLog('TRANSLATION_SYNTHESIS_REQUEST', 'translation', newTranslation.id, 'SUCCESS', JSON.stringify({ meetingId, langCode }));
   };
 
-  // Helper: Audit Logger
-  const addAuditLog = (action: string, resource_type: string, resource_id: string, status: 'SUCCESS' | 'DENIED' | 'FAILED', payload: string) => {
-    const newLog: AuditLogItem = {
-      id: `aud-${Date.now().toString(36)}`,
-      timestamp: new Date().toISOString(),
-      user_id: auth.user_id,
-      user_email: auth.user_email,
-      action,
-      resource_type,
-      resource_id,
-      ip_address: '10.0.4.12',
-      status,
-      sanitized_payload: payload
-    };
-    setAuditLogs(prev => [newLog, ...prev]);
-  };
-
-  // Switch RBAC Role
-  const handleSwitchRole = (role: 'host' | 'admin' | 'member' | 'security_officer') => {
-    setAuth(prev => ({ ...prev, role }));
-    addAuditLog('RBAC_ROLE_SWITCH', 'user_claims', auth.user_id, 'SUCCESS', JSON.stringify({ new_role: role }));
+  // Handler: Switch Role for RBAC Testing
+  const handleSwitchRole = (newRole: any) => {
+    setAuth(prev => ({ ...prev, role: newRole }));
+    addAuditLog('SECURITY_ROLE_SWITCH', 'auth_context', auth.user_id, 'SUCCESS', JSON.stringify({ newRole }));
   };
 
   interface NavItem {
@@ -401,7 +444,7 @@ export default function App() {
     key: 'meetings' | 'live_stream' | 'intelligence' | 'queries' | 'knowledge' | 'translations' | 'reports' | 'benchmarks' | 'security' | 'api_console';
     label: string;
     shortLabel: string;
-    icon: React.ComponentType<{ className?: string }>;
+    icon: any;
     color: string;
     badge: string;
     description: string;
@@ -412,52 +455,53 @@ export default function App() {
     items: NavItem[];
   }
 
+  // Categorized Navigation
   const NAV_CATEGORIES: NavCategory[] = [
     {
-      title: 'Session & Ingestion',
+      title: 'Core Meeting Pipeline',
       items: [
         {
           id: 'tab-meetings',
           key: 'meetings',
-          label: 'Meetings & Ingestion',
+          label: 'Meetings & Audio Intake',
           shortLabel: 'Meetings',
           icon: Users,
           color: 'text-indigo-400',
           badge: `${meetings.length}`,
-          description: 'Upload audio & run ACE pipeline'
+          description: 'Batch audio intake & chunking'
         },
         {
           id: 'tab-live-stream',
           key: 'live_stream',
-          label: 'Live Streaming',
+          label: 'Real-Time Live Stream',
           shortLabel: 'Live Stream',
           icon: Radio,
           color: 'text-rose-400',
-          badge: 'Live Audio',
-          description: 'Low-latency VAD chunking'
-        }
-      ]
-    },
-    {
-      title: 'Blackboard Intelligence',
-      items: [
+          badge: 'WebSocket',
+          description: 'Live streaming transcription'
+        },
         {
           id: 'tab-intelligence',
           key: 'intelligence',
-          label: 'Intelligence & Decisions',
+          label: 'Multi-Agent Intelligence (ACE)',
           shortLabel: 'Intelligence',
           icon: Sparkles,
           color: 'text-purple-400',
           badge: '13 Modules',
           description: 'Summary, decisions & ACE trace'
-        },
+        }
+      ]
+    },
+    {
+      title: 'Knowledge & Analytics',
+      items: [
         {
           id: 'tab-queries',
           key: 'queries',
           label: 'Ask ABCI-MI (Queries)',
           shortLabel: 'Queries',
           icon: Search,
-          color: 'text-indigo-400',
+          color: 'text-blue-400',
           badge: 'Grounded',
           description: 'Cross-meeting grounded Q&A'
         },
@@ -467,7 +511,7 @@ export default function App() {
           label: 'Knowledge Warehouse (SKW)',
           shortLabel: 'Knowledge',
           icon: Database,
-          color: 'text-purple-400',
+          color: 'text-teal-400',
           badge: `${knowledgeObjects.length} KOs`,
           description: 'Vector embeddings & memory'
         },
@@ -531,32 +575,59 @@ export default function App() {
   ];
 
   return (
-    <div id="abci-mi-root" className={`min-h-screen font-sans antialiased selection:bg-[#2563EB] selection:text-white transition-colors ${theme === 'dark' ? 'bg-neutral-950 text-neutral-100' : 'bg-[#F7F9FC] text-[#0F172A]'}`}>
-      {/* Top Header & Metrics */}
+    <div
+      id="abci-mi-root"
+      className={`min-h-screen font-sans antialiased selection:bg-indigo-600 selection:text-white transition-colors ${
+        theme === 'dark' ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'
+      }`}
+    >
+      {/* Top Header & Status Metrics */}
       <Header
         auth={auth}
         notifications={notifications}
         onOpenNotifications={() => setShowNotificationsModal(true)}
         theme={theme}
-        onToggleTheme={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+        onToggleTheme={() => setTheme(t => (t === 'dark' ? 'light' : 'dark'))}
+        onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
       />
 
-      {/* Main Feature Workspace with Sidebar Navigation Layout */}
-      <main id="app-main-content" className="w-full max-w-[1720px] mx-auto px-4 sm:px-6 lg:px-10 py-6">
+      {/* Command Palette Modal */}
+      <CommandPalette
+        isOpen={isCommandPaletteOpen}
+        onClose={() => setIsCommandPaletteOpen(false)}
+        activeTab={activeTab}
+        onSelectTab={setActiveTab}
+        meetings={meetings}
+        onSelectMeeting={setSelectedMeetingId}
+        theme={theme}
+      />
+
+      {/* Main Workspace Layout with Sidebar and Viewport */}
+      <main id="app-main-content" className="w-full max-w-[1760px] mx-auto px-4 sm:px-6 lg:px-8 py-5">
         {/* Mobile Header Menu Bar */}
-        <div className={`md:hidden flex items-center justify-between border rounded-xl p-3 mb-4 backdrop-blur-sm ${theme === 'dark' ? 'bg-neutral-900/80 border-neutral-800 text-white' : 'bg-[#FFFFFF] border-[#E2E8F0] text-[#0F172A]'}`}>
+        <div
+          className={`md:hidden flex items-center justify-between border rounded-2xl p-3 mb-4 backdrop-blur-md ${
+            theme === 'dark' ? 'bg-slate-900/80 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900 shadow-xs'
+          }`}
+        >
           <div className="flex items-center space-x-2">
-            <span className={`text-xs font-semibold ${theme === 'dark' ? 'text-neutral-400' : 'text-[#475569]'}`}>Current View:</span>
-            <span className={`text-xs font-bold uppercase tracking-wider px-2.5 py-1 rounded-md border ${theme === 'dark' ? 'bg-indigo-950/80 text-indigo-300 border-indigo-800/60' : 'bg-blue-50 text-[#2563EB] border-blue-200'}`}>
+            <span className={`text-xs font-semibold ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>Current View:</span>
+            <span
+              className={`text-xs font-bold uppercase tracking-wider px-2.5 py-1 rounded-lg border ${
+                theme === 'dark' ? 'bg-indigo-950/80 text-indigo-300 border-indigo-800/60' : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+              }`}
+            >
               {NAV_CATEGORIES.flatMap(c => c.items).find(i => i.key === activeTab)?.label}
             </span>
           </div>
           <button
             onClick={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${theme === 'dark' ? 'bg-neutral-800 text-neutral-200 hover:text-white border-neutral-700' : 'bg-[#F7F9FC] text-[#0F172A] hover:bg-slate-100 border-[#E2E8F0]'}`}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
+              theme === 'dark' ? 'bg-slate-800 text-slate-200 hover:text-white border-slate-700' : 'bg-slate-100 text-slate-800 hover:bg-slate-200 border-slate-200'
+            }`}
           >
-            <Menu className={`w-4 h-4 ${theme === 'dark' ? 'text-indigo-400' : 'text-[#2563EB]'}`} />
-            <span>{isMobileSidebarOpen ? 'Close Menu' : 'Browse Modules'}</span>
+            <Menu className={`w-4 h-4 ${theme === 'dark' ? 'text-indigo-400' : 'text-indigo-600'}`} />
+            <span>{isMobileSidebarOpen ? 'Close' : 'Modules'}</span>
           </button>
         </div>
 
@@ -569,18 +640,22 @@ export default function App() {
               exit={{ opacity: 0 }}
               className="md:hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex flex-col p-4"
             >
-              <div className={`border rounded-2xl p-4 flex-1 overflow-y-auto space-y-4 shadow-2xl ${theme === 'dark' ? 'bg-neutral-900 border-neutral-800 text-white' : 'bg-[#FFFFFF] border-[#E2E8F0] text-[#0F172A]'}`}>
-                <div className={`flex items-center justify-between border-b pb-3 ${theme === 'dark' ? 'border-neutral-800' : 'border-[#E2E8F0]'}`}>
+              <div
+                className={`border rounded-2xl p-4 flex-1 overflow-y-auto space-y-4 shadow-2xl ${
+                  theme === 'dark' ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+                }`}
+              >
+                <div className={`flex items-center justify-between border-b pb-3 ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
                   <div className="flex items-center space-x-2">
-                    <Workflow className={`w-5 h-5 ${theme === 'dark' ? 'text-indigo-400' : 'text-[#2563EB]'}`} />
+                    <Workflow className={`w-5 h-5 ${theme === 'dark' ? 'text-indigo-400' : 'text-indigo-600'}`} />
                     <div>
                       <h3 className="text-sm font-bold">ABCI-MI Navigation</h3>
-                      <p className={`text-[11px] ${theme === 'dark' ? 'text-neutral-400' : 'text-[#475569]'}`}>13-Module Meeting Intelligence Engine</p>
+                      <p className={`text-[11px] ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>13-Module Meeting Intelligence Engine</p>
                     </div>
                   </div>
                   <button
                     onClick={() => setIsMobileSidebarOpen(false)}
-                    className={`p-2 rounded-lg ${theme === 'dark' ? 'bg-neutral-800 text-neutral-400 hover:text-white' : 'bg-slate-100 text-[#475569] hover:text-[#0F172A]'}`}
+                    className={`p-2 rounded-xl ${theme === 'dark' ? 'bg-slate-800 text-slate-400 hover:text-white' : 'bg-slate-100 text-slate-600 hover:text-slate-900'}`}
                   >
                     <X className="w-4 h-4" />
                   </button>
@@ -589,7 +664,7 @@ export default function App() {
                 <div className="space-y-4">
                   {NAV_CATEGORIES.map(category => (
                     <div key={category.title} className="space-y-1.5">
-                      <div className={`text-[10px] font-bold uppercase tracking-wider px-2 ${theme === 'dark' ? 'text-neutral-400' : 'text-[#475569]'}`}>
+                      <div className={`text-[10px] font-bold uppercase tracking-wider px-2 ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>
                         {category.title}
                       </div>
                       <div className="space-y-1">
@@ -606,17 +681,25 @@ export default function App() {
                               }}
                               className={`w-full flex items-center justify-between p-2.5 rounded-xl text-left transition-all ${
                                 isActive
-                                  ? theme === 'dark' ? 'bg-indigo-600 text-white font-semibold shadow-md' : 'bg-[#2563EB] text-white font-semibold shadow-md'
-                                  : theme === 'dark' ? 'bg-neutral-950/60 text-neutral-300 hover:bg-neutral-800 border border-neutral-800/60' : 'bg-[#F7F9FC] text-[#0F172A] hover:bg-slate-100 border border-[#E2E8F0]'
+                                  ? 'bg-indigo-600 text-white font-semibold shadow-md shadow-indigo-600/30'
+                                  : theme === 'dark'
+                                  ? 'bg-slate-950/60 text-slate-300 hover:bg-slate-800 border border-slate-800/60'
+                                  : 'bg-slate-50 text-slate-800 hover:bg-slate-100 border border-slate-200'
                               }`}
                             >
                               <div className="flex items-center space-x-2.5">
                                 <IconComponent className={`w-4 h-4 ${isActive ? 'text-white' : item.color}`} />
                                 <span className="text-xs">{item.label}</span>
                               </div>
-                              <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold ${
-                                isActive ? theme === 'dark' ? 'bg-indigo-800 text-white' : 'bg-[#1D4ED8] text-white' : theme === 'dark' ? 'bg-neutral-800 text-neutral-400' : 'bg-slate-200 text-[#475569]'
-                              }`}>
+                              <span
+                                className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold ${
+                                  isActive
+                                    ? 'bg-indigo-800 text-white'
+                                    : theme === 'dark'
+                                    ? 'bg-slate-800 text-slate-400'
+                                    : 'bg-slate-200 text-slate-600'
+                                }`}
+                              >
                                 {item.badge}
                               </span>
                             </button>
@@ -632,19 +715,19 @@ export default function App() {
         </AnimatePresence>
 
         {/* Layout Container: Animated Sidebar + Main Viewport */}
-        <div className="flex items-start gap-6">
+        <div className="flex items-start gap-5">
           {/* Animated Desktop Sidebar */}
           <motion.aside
-            animate={{ width: isSidebarCollapsed ? 88 : 320 }}
+            animate={{ width: isSidebarCollapsed ? 84 : 310 }}
             transition={{ type: 'spring', stiffness: 320, damping: 30 }}
-            className={`hidden md:flex flex-col shrink-0 rounded-2xl p-4 backdrop-blur-xl sticky top-24 self-start max-h-[calc(100vh-7.5rem)] overflow-y-auto overflow-x-hidden shadow-2xl ${
+            className={`hidden md:flex flex-col shrink-0 rounded-2xl p-3.5 backdrop-blur-xl sticky top-20 self-start max-h-[calc(100vh-6.5rem)] overflow-y-auto overflow-x-hidden shadow-xl ${
               theme === 'dark'
-                ? 'bg-neutral-900/80 border border-neutral-800/95 shadow-indigo-950/20 text-white'
-                : 'bg-[#FFFFFF] border border-[#E2E8F0] shadow-slate-200/50 text-[#0F172A]'
+                ? 'bg-slate-900/80 border border-slate-800/90 shadow-indigo-950/20 text-white'
+                : 'bg-white border border-slate-200/90 shadow-slate-200/60 text-slate-900'
             }`}
           >
             {/* Sidebar Collapse Toggle Header */}
-            <div className={`flex items-center justify-between border-b pb-2.5 mb-3 px-1 ${theme === 'dark' ? 'border-neutral-800/80' : 'border-[#E2E8F0]'}`}>
+            <div className={`flex items-center justify-between border-b pb-2.5 mb-3 px-1 ${theme === 'dark' ? 'border-slate-800/80' : 'border-slate-200'}`}>
               {!isSidebarCollapsed && (
                 <motion.div
                   initial={{ opacity: 0 }}
@@ -652,9 +735,9 @@ export default function App() {
                   exit={{ opacity: 0 }}
                   className="flex items-center space-x-2 overflow-hidden"
                 >
-                  <Workflow className={`w-4 h-4 shrink-0 ${theme === 'dark' ? 'text-indigo-400' : 'text-[#2563EB]'}`} />
-                  <span className={`text-xs font-bold tracking-tight truncate ${theme === 'dark' ? 'text-white' : 'text-[#0F172A]'}`}>
-                    Framework Tabs
+                  <Workflow className={`w-4 h-4 shrink-0 ${theme === 'dark' ? 'text-indigo-400' : 'text-indigo-600'}`} />
+                  <span className={`text-xs font-bold tracking-tight truncate ${theme === 'dark' ? 'text-white' : 'text-slate-900'}`}>
+                    Framework Modules
                   </span>
                 </motion.div>
               )}
@@ -663,14 +746,14 @@ export default function App() {
                 title={isSidebarCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
                 className={`p-1.5 rounded-lg border transition-colors ml-auto ${
                   theme === 'dark'
-                    ? 'bg-neutral-950 hover:bg-neutral-800 border-neutral-800 text-neutral-400 hover:text-white'
-                    : 'bg-[#F7F9FC] hover:bg-slate-100 border-[#E2E8F0] text-[#475569] hover:text-[#0F172A]'
+                    ? 'bg-slate-950 hover:bg-slate-800 border-slate-800 text-slate-400 hover:text-white'
+                    : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-600 hover:text-slate-900'
                 }`}
               >
                 {isSidebarCollapsed ? (
-                  <PanelLeftOpen className={`w-4 h-4 ${theme === 'dark' ? 'text-indigo-400' : 'text-[#2563EB]'}`} />
+                  <PanelLeftOpen className={`w-4 h-4 ${theme === 'dark' ? 'text-indigo-400' : 'text-indigo-600'}`} />
                 ) : (
-                  <PanelLeftClose className="w-4 h-4 text-neutral-400" />
+                  <PanelLeftClose className="w-4 h-4 text-slate-400" />
                 )}
               </button>
             </div>
@@ -683,7 +766,9 @@ export default function App() {
                     <motion.div
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
-                      className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 select-none ${theme === 'dark' ? 'text-neutral-400' : 'text-[#475569]'}`}
+                      className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 select-none ${
+                        theme === 'dark' ? 'text-slate-400' : 'text-slate-500'
+                      }`}
                     >
                       {category.title}
                     </motion.div>
@@ -707,7 +792,9 @@ export default function App() {
                           } rounded-xl text-xs font-medium transition-all group overflow-hidden ${
                             isActive
                               ? 'text-white font-semibold'
-                              : theme === 'dark' ? 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/60' : 'text-[#475569] hover:text-[#0F172A] hover:bg-[#F7F9FC]'
+                              : theme === 'dark'
+                              ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+                              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                           }`}
                         >
                           {/* Animated Active Backdrop Indicator */}
@@ -716,20 +803,8 @@ export default function App() {
                               layoutId="activeSidebarIndicator"
                               className={`absolute inset-0 rounded-xl ${
                                 theme === 'dark'
-                                  ? 'bg-indigo-600/25 border border-indigo-500/50 shadow-[0_0_15px_rgba(99,102,241,0.2)]'
-                                  : 'bg-[#2563EB] border border-[#1D4ED8] shadow-[0_0_15px_rgba(37,99,235,0.25)]'
-                              }`}
-                              initial={false}
-                              transition={{ type: 'spring', stiffness: 380, damping: 30 }}
-                            />
-                          )}
-
-                          {/* Active Left Accent Glow Pill */}
-                          {isActive && (
-                            <motion.div
-                              layoutId="activeSidebarPill"
-                              className={`absolute left-0 top-2 bottom-2 w-1 rounded-r-full ${
-                                theme === 'dark' ? 'bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.9)]' : 'bg-[#1D4ED8] shadow-[0_0_8px_rgba(29,78,216,0.9)]'
+                                  ? 'bg-indigo-600 shadow-md shadow-indigo-600/30'
+                                  : 'bg-indigo-600 shadow-md shadow-indigo-600/25'
                               }`}
                               initial={false}
                               transition={{ type: 'spring', stiffness: 380, damping: 30 }}
@@ -740,7 +815,7 @@ export default function App() {
                           <div className="relative z-10 flex items-center space-x-2.5 min-w-0">
                             <IconComponent
                               className={`w-4 h-4 shrink-0 transition-transform group-hover:scale-110 ${
-                                isActive ? 'text-indigo-400' : item.color
+                                isActive ? 'text-white' : item.color
                               }`}
                             />
                             {!isSidebarCollapsed && (
@@ -755,8 +830,10 @@ export default function App() {
                             <span
                               className={`relative z-10 text-[10px] px-2 py-0.5 rounded-full font-mono font-bold shrink-0 ml-1.5 ${
                                 isActive
-                                  ? 'bg-indigo-500/30 text-indigo-200 border border-indigo-400/40'
-                                  : 'bg-neutral-950 text-neutral-400 border border-neutral-800 group-hover:border-neutral-700'
+                                  ? 'bg-indigo-800/80 text-white'
+                                  : theme === 'dark'
+                                  ? 'bg-slate-950 text-slate-400 border border-slate-800 group-hover:border-slate-700'
+                                  : 'bg-slate-100 text-slate-600 border border-slate-200'
                               }`}
                             >
                               {item.badge}
@@ -775,28 +852,39 @@ export default function App() {
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                className="mt-4 pt-3 border-t border-neutral-800/80 px-2 space-y-1 text-[10px] text-neutral-400 font-mono"
+                className={`mt-4 pt-3 border-t px-2 space-y-1 text-[10px] font-mono ${
+                  theme === 'dark' ? 'border-slate-800/80 text-slate-400' : 'border-slate-200 text-slate-500'
+                }`}
               >
                 <div className="flex items-center justify-between">
-                  <span className="flex items-center gap-1.5 text-neutral-400">
+                  <span className="flex items-center gap-1.5">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                     ACE Orchestrator
                   </span>
-                  <span className="text-emerald-400 font-bold">ACTIVE</span>
+                  <span className="text-emerald-500 font-bold">ONLINE</span>
                 </div>
-                <div className="text-neutral-400">13 Modules &bull; UCS: 95%</div>
+                <div className="text-slate-400">Open-MOSS &bull; PyAnnote</div>
               </motion.div>
             )}
           </motion.aside>
 
-          {/* Main Content View with Smooth Page Transition Animation */}
+          {/* Main Content Viewport */}
           <div className="flex-1 min-w-0">
+            {/* Real-time System Status Telemetry Strip */}
+            <SystemStatusBar
+              theme={theme}
+              activeMeetingTitle={selectedMeeting?.title}
+              totalMeetingsCount={meetings.length}
+              totalKnowledgeObjects={knowledgeObjects.length}
+            />
+
+            {/* View Transitions */}
             <AnimatePresence mode="wait">
               <motion.div
                 key={activeTab}
-                initial={{ opacity: 0, y: 10, scale: 0.995 }}
+                initial={{ opacity: 0, y: 8, scale: 0.995 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -10, scale: 0.995 }}
+                exit={{ opacity: 0, y: -8, scale: 0.995 }}
                 transition={{ duration: 0.2, ease: 'easeOut' }}
                 className="space-y-6"
               >
@@ -809,6 +897,19 @@ export default function App() {
                     onCreateMeeting={handleCreateMeeting}
                     onUploadAudio={handleUploadAudio}
                     onProcessMeeting={handleProcessMeeting}
+                    onViewIntelligence={(meetingId) => {
+                      setSelectedMeetingId(meetingId);
+                      setActiveTab('intelligence');
+                    }}
+                    onDeleteMeeting={(id) => {
+                      setMeetings(prev => prev.filter(m => m.id !== id));
+                      if (selectedMeetingId === id) {
+                        const remaining = meetings.filter(m => m.id !== id);
+                        if (remaining.length > 0) setSelectedMeetingId(remaining[0].id);
+                      }
+                      addAuditLog('MEETING_DELETE', 'meeting', id, 'SUCCESS', '{}');
+                    }}
+                    theme={theme}
                   />
                 )}
 
@@ -898,15 +999,19 @@ export default function App() {
       {/* Notifications Drawer Modal */}
       {showNotificationsModal && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
+          <div
+            className={`border rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl ${
+              theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-900'
+            }`}
+          >
+            <div className={`flex items-center justify-between border-b pb-3 ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
               <div className="flex items-center space-x-2">
                 <Bell className="w-4 h-4 text-indigo-400" />
-                <h3 className="text-sm font-bold text-white">Notification Events</h3>
+                <h3 className="text-sm font-bold">Real-time Notification Events</h3>
               </div>
               <button
                 onClick={() => setShowNotificationsModal(false)}
-                className="p-1 rounded text-neutral-400 hover:text-white"
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-200"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -916,20 +1021,26 @@ export default function App() {
               {notifications.map((notif) => (
                 <div
                   key={notif.id}
-                  className={`p-3 rounded-lg border text-xs space-y-1 ${
-                    notif.read ? 'bg-neutral-950 border-neutral-800 opacity-75' : 'bg-neutral-950 border-indigo-900/60'
+                  className={`p-3 rounded-xl border text-xs space-y-1 ${
+                    notif.read
+                      ? theme === 'dark'
+                        ? 'bg-slate-950 border-slate-800/80 opacity-75'
+                        : 'bg-slate-50 border-slate-200 opacity-75'
+                      : theme === 'dark'
+                      ? 'bg-slate-950 border-indigo-900/60 shadow-xs'
+                      : 'bg-indigo-50/50 border-indigo-200'
                   }`}
                 >
                   <div className="flex items-center justify-between">
-                    <span className="font-semibold text-white">{notif.title}</span>
-                    <span className="text-[10px] text-neutral-500">{new Date(notif.created_at).toLocaleTimeString()}</span>
+                    <span className="font-semibold">{notif.title}</span>
+                    <span className="text-[10px] text-slate-400 font-mono">{new Date(notif.created_at).toLocaleTimeString()}</span>
                   </div>
-                  <p className="text-[11px] text-neutral-300">{notif.message}</p>
+                  <p className={`text-[11px] ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>{notif.message}</p>
                 </div>
               ))}
             </div>
 
-            <div className="pt-2 border-t border-neutral-800 flex justify-between items-center">
+            <div className={`pt-3 border-t flex justify-between items-center ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
               <button
                 onClick={() => {
                   setNotifications(prev => prev.map(n => ({ ...n, read: true })));
@@ -940,7 +1051,9 @@ export default function App() {
               </button>
               <button
                 onClick={() => setShowNotificationsModal(false)}
-                className="px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs font-semibold text-white"
+                className={`px-4 py-2 rounded-xl text-xs font-semibold ${
+                  theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-white' : 'bg-slate-100 hover:bg-slate-200 text-slate-900'
+                }`}
               >
                 Close
               </button>

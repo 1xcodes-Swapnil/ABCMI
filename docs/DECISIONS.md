@@ -22,6 +22,7 @@
 - **ADR-013**: Cryptographic HS256 JWT Authentication, Tenant Isolation & SHA-256 Chained Audit Logs
 - **ADR-014**: Acoustic & Indic NLP Foundation Models: OpenMOSS-Transcribe-Diarize and Sarvam-1
 - **ADR-015**: Benchmark Datasets & Universal Schema Specification (AMI, VoxConverse, DIHARD, AISHELL, MCV, NCRB)
+- **ADR-016**: Phase 4.26 Long Audio Chunking Pipeline, Global Timestamp Reconstruction, Speaker Reconciliation & PyAnnote Cross-Verification
 
 ---
 
@@ -176,3 +177,19 @@
   2. Maintain `SCHEMA.md` as the unified source of truth for PostgreSQL tables, Qdrant vector schemas, Redis channels, and Merkle audit ledgers.
 - **Rationale**: Guarantees zero regression against SOTA baselines and provides clear architectural contracts for downstream consumers and developers.
 - **Data Flow Impact**: Evaluation harnesses run benchmark datasets through standard pipelines; database schemas enforce relational integrity across all entities.
+
+---
+
+## ADR-016: Phase 4.26 Long Audio Chunking Pipeline, Global Timestamp Reconstruction, Speaker Reconciliation & PyAnnote Cross-Verification
+- **Status**: Accepted
+- **Context**: Long meeting recordings (1 to 2+ hours) cannot be processed as monolithic audio files without risking GPU out-of-memory faults, attention context exhaustion, and speaker attribution drift.
+- **Decision**:
+  1. Implement **`LongAudioProcessor`** to mathematically slice long audio into 600.0s chunks with 30.0s overlaps.
+  2. Implement **Global Timestamp Reconstruction**: Map local chunk offsets $[0.0, \text{duration}_i]$ to continuous global meeting time ($t_{global} = t_{local} + \text{Start}_i$).
+  3. Implement **Cross-Chunk Speaker Reconciliation**: Resolve local speaker IDs across chunk overlaps using Hungarian bipartite matching on temporal intersections.
+  4. Implement **Boundary Overlap Deduplication**: Prune duplicate text in overlap regions using normalized Levenshtein distance ($\text{Sim} \ge 0.80$).
+  5. Integrate **PyAnnote.audio** as an independent verification model to detect speaker attribution conflicts (`SPEAKER_MISMATCH`, `SPEAKER_CONFLICT`).
+  6. Enforce **Strict REAL-Mode Validation**: Under `EXECUTION_MODE=REAL`, halt with explicit diagnostic errors if PyTorch, CUDA, or weights are unavailable; prohibit silent mock/CPU fallback.
+- **Rationale**: Enables ABCI-MI to process arbitrary meeting lengths without degradation in accuracy or memory stability, backed by independent cross-verification.
+- **Data Flow Impact**: Long audio is segmented, processed sequentially through MOSS, reconciled, deduplicated, and assembled into a seamless global transcript before passing to the ACE blackboard. (See [`flow.md`](../flow.md) for full visual state diagrams).
+

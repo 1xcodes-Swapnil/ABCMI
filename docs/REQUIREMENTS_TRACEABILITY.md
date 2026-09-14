@@ -52,3 +52,6 @@ The following matrix maps the core scientific and research objectives to the con
 | **REQ-QRY-02** | Timezone-aware date-range query filtering (`start_time`, `end_time`) | Query History Repo | `app/repositories/query_repo.py` | `tests/test_query_interface_phase_4_23.py` | Verified (Phase 4.23) |
 | **REQ-NOT-01** | Real-time notification dispatch, event deduplication, and retention | Notification Service | `app/services/notification_service.py` | `tests/test_notifications_phase_4_24.py` | Verified (Phase 4.24) |
 | **REQ-SEC-01** | Immutable audit logs, secret redaction, access-denials & admin telemetry | Audit / Admin | `app/services/audit_service.py` | `tests/test_admin_audit_security_phase_4_25.py` | Verified (Phase 4.25) |
+| **REQ-LNG-01** | Long-audio chunk planning, window slicing, global timestamp remapping & speaker reconciliation | Chunk Processing | `app/ai/long_audio_processor.py`, `app/ai/multilingual_asr.py` | `tests/test_long_audio_chunking_phase_4_26.py` | Verified (Phase 4.26) |
+| **REQ-VAL-01** | OpenMOSS provider, PyAnnote cross-verification, and strict zero-fallback REAL-mode CLI startup check | Model Verification | `app/ai/openmoss_provider.py`, `app/ai/model_verification.py`, `app/cli.py` | `tests/test_moss_pyannote_integration_phase_4_26.py`, `tests/test_cli_interface.py` | Verified (Phase 4.26) |
+

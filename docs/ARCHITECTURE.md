@@ -12,13 +12,14 @@ ABCI-MI is an enterprise-grade meeting intelligence, speech processing, and sema
 
 The architecture is built on a decoupled, reactive, multi-agent model combining state-of-the-art acoustic front-ends, Indic/Hinglish language models, multi-agent blackboard consensus engines, dense vector semantic memory, and ACID-compliant relational persistence.
 
-> For an in-depth mathematical, operational, and lifecycle breakdown of every model and algorithm used in the system, see the companion document: [Models & Algorithms Specification (How, Where, Why, What, When)](MODELS_AND_ALGORITHMS.md).
+> For an in-depth mathematical, operational, and lifecycle breakdown of every model and algorithm used in the system, see the companion document: [Models & Algorithms Specification (How, Where, Why, What, When)](MODELS_AND_ALGORITHMS.md).  
+> For the visual system flow, state transitions, and sequence diagrams across all layers, see: **[System & Data Flow Architecture (`flow.md`)](../flow.md)**.
 
 ---
 
 ## 2. End-to-End Component-by-Component Data Flow
 
-The following lifecycle details exactly how data **enters**, how it is **processed**, and how it is **passed forward** across every architectural component in ABCI-MI:
+The following lifecycle details exactly how data **enters**, how it is **processed**, and how it is **passed forward** across every architectural component in ABCI-MI (including Phase 4.26 Long Audio Chunking, MOSS acoustic inference, PyAnnote verification, and the ACE blackboard):
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -29,8 +30,14 @@ The following lifecycle details exactly how data **enters**, how it is **process
                                                     │ Passes validated PCM audio & chunk paths
                                                     ▼
 ┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                 2. ACOUSTIC ASR & SPEAKER DIARIZATION                                  │
-│  [MOSS-Transcribe-Diarize Neural Engine]                                                               │
+│                          2. PHASE 4.26 LONG-AUDIO CHUNKING & ACOUSTIC ASR                              │
+│  [LongAudioProcessor + MOSS-Transcribe-Diarize + PyAnnote Diarization Verification]                    │
+│  • Sliding-Window Chunk Planning (600s chunks, 30s overlap) for long meetings (1-2+ hours)             │
+│  • Binary Sub-Process WAV Slicing with intact RIFF headers                                             │
+│  • Global Timestamp Reconstruction: remapping local chunk offsets to continuous global timeline        │
+│  • Cross-Chunk Speaker Reconciliation: Hungarian bipartite overlap tracking across boundaries          │
+│  • Boundary-Aware Overlap Deduplication: Normalized Levenshtein string matching (>0.80 similarity)     │
+│  • PyAnnote Independent Cross-Verification: Disagreement detection & SPEAKER_MISMATCH logging          │
 │  • Silero VAD (250ms Collar)  • 80-channel Log-Mel Filterbanks  • EEND-EDA Multi-Talker Transformer    │
 │  • ECAPA-TDNN 192-dim Speaker Embeddings  • Dynamic Time Warping (DTW) Sub-50ms Forced Alignment       │
 │  • Permutation Invariant Training (PIT) Overlapping Speech Separation (Overlap F1 > 0.65)              │

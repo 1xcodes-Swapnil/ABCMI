@@ -90,8 +90,9 @@ class SpeakerDiarizationEngine:
                     ) from ex
 
                 if not settings.HF_TOKEN:
+                    logger.warning("PYANNOTE BLOCKED: Hugging Face Auth Token (HF_TOKEN) is required in the environment for REAL PyAnnote diarization.")
                     raise RuntimeError(
-                        "Hugging Face Auth Token (HF_TOKEN) is required in the environment for REAL PyAnnote diarization."
+                        "PYANNOTE BLOCKED: Hugging Face Auth Token (HF_TOKEN) is required in the environment for REAL PyAnnote diarization."
                     )
 
                 try:
@@ -100,11 +101,13 @@ class SpeakerDiarizationEngine:
                         use_auth_token=settings.HF_TOKEN
                     )
                     if pipeline is None:
-                        raise ValueError("Pipeline returned None from Hugging Face.")
+                        logger.warning("PYANNOTE BLOCKED: PyAnnote pipeline returned None from Hugging Face.")
+                        raise ValueError("PYANNOTE BLOCKED: Pipeline returned None from Hugging Face.")
                     device = torch.device("cuda" if (settings.OPENMOSS_DEVICE == "cuda" and torch.cuda.is_available()) else "cpu")
                     pipeline.to(device)
                 except Exception as ex:
-                    raise RuntimeError(f"Failed to load PyAnnote diarization model: {ex}") from ex
+                    logger.warning("PYANNOTE BLOCKED: Failed to load PyAnnote diarization model: %s", ex)
+                    raise RuntimeError(f"PYANNOTE BLOCKED: Failed to load PyAnnote diarization model: {ex}") from ex
 
                 # 4. Perform actual inference
                 try:
