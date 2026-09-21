@@ -31,10 +31,16 @@ import {
   X,
   UserCheck,
   AlertTriangle,
-  RotateCcw
+  RotateCcw,
+  Workflow,
+  Cpu,
+  Brain,
+  GitBranch,
+  Terminal
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { MeetingItem, MeetingStatus } from '../types';
+import { MeetingPipelineTimeline, PIPELINE_STAGES } from './MeetingPipelineTimeline';
 
 interface MeetingsTesterProps {
   meetings: MeetingItem[];
@@ -105,6 +111,21 @@ export const MeetingsTester: React.FC<MeetingsTesterProps> = ({
   // Delete Confirmation State
   const [meetingToDelete, setMeetingToDelete] = useState<MeetingItem | null>(null);
   const [deleteToast, setDeleteToast] = useState<string | null>(null);
+
+  // Pipeline Timeline Execution Modal & Inline Inspector State
+  const [timelineMeeting, setTimelineMeeting] = useState<MeetingItem | null>(null);
+  const [expandedTimelineCardIds, setExpandedTimelineCardIds] = useState<string[]>([]);
+
+  const toggleExpandTimeline = (meetingId: string) => {
+    setExpandedTimelineCardIds(prev =>
+      prev.includes(meetingId) ? prev.filter(id => id !== meetingId) : [...prev, meetingId]
+    );
+  };
+
+  const handleLaunchPipelineExecution = (meeting: MeetingItem) => {
+    onProcessMeeting(meeting.id);
+    setTimelineMeeting(meeting);
+  };
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -855,6 +876,18 @@ export const MeetingsTester: React.FC<MeetingsTesterProps> = ({
 
                   {/* Top Right Quick Actions */}
                   <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+                    {/* Dedicated Pipeline Execution Timeline Action */}
+                    <button
+                      id={`btn-view-pipeline-timeline-${m.id}`}
+                      type="button"
+                      onClick={() => setTimelineMeeting(m)}
+                      className="px-3 py-1.5 rounded-xl bg-indigo-950/70 hover:bg-indigo-900/80 border border-indigo-800/80 text-indigo-200 text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs hover:border-indigo-600"
+                      title="View End-to-End Pipeline Execution Timeline"
+                    >
+                      <Workflow className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>Pipeline Timeline</span>
+                    </button>
+
                     {onViewIntelligence && m.status === 'completed' && (
                       <button
                         type="button"
@@ -881,6 +914,117 @@ export const MeetingsTester: React.FC<MeetingsTesterProps> = ({
                       </button>
                     )}
                   </div>
+                </div>
+
+                {/* Inline 7-Stage End-to-End Pipeline Execution Visualizer */}
+                <div className="p-3.5 rounded-2xl bg-slate-950/80 border border-slate-800/80 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Workflow className="w-3.5 h-3.5 text-indigo-400" />
+                      <span className="text-xs font-bold text-slate-300 tracking-tight">
+                        End-to-End Pipeline Execution Map
+                      </span>
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-slate-400">
+                        7 Stages &bull; Open-MOSS + ACE
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleExpandTimeline(m.id);
+                        }}
+                        className="text-[11px] font-medium text-slate-400 hover:text-slate-200 flex items-center gap-1 cursor-pointer transition-colors"
+                      >
+                        <span>{expandedTimelineCardIds.includes(m.id) ? 'Hide Stage Architecture' : 'Inspect Stages'}</span>
+                        {expandedTimelineCardIds.includes(m.id) ? (
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        ) : (
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Horizontal 7-Stage Node Track */}
+                  <div className="grid grid-cols-7 gap-1.5">
+                    {PIPELINE_STAGES.map((stage, sIdx) => {
+                      const isComplete = m.status === 'completed';
+                      const isProcessing = m.status === 'processing';
+                      const isCurrent = isProcessing && sIdx === 2; // Active representative stage for quick glance
+
+                      return (
+                        <div
+                          key={`card-stage-${stage.id}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setTimelineMeeting(m);
+                          }}
+                          className={`p-1.5 rounded-xl border text-center transition-all cursor-pointer group ${
+                            isComplete
+                              ? 'bg-emerald-950/20 border-emerald-800/50 hover:border-emerald-500'
+                              : isCurrent
+                              ? 'bg-teal-950/40 border-teal-500 animate-pulse ring-1 ring-teal-500/50'
+                              : 'bg-slate-900/40 border-slate-800/60 hover:border-slate-700'
+                          }`}
+                          title={`Click to open full execution timeline for ${stage.title}`}
+                        >
+                          <div className="flex items-center justify-center gap-1 mb-1">
+                            <span
+                              className={`w-3.5 h-3.5 rounded-full text-[9px] flex items-center justify-center font-bold font-mono ${
+                                isComplete
+                                  ? 'bg-emerald-500 text-slate-950'
+                                  : isCurrent
+                                  ? 'bg-teal-400 text-slate-950 animate-spin'
+                                  : 'bg-slate-800 text-slate-400'
+                              }`}
+                            >
+                              {isComplete ? '✓' : stage.stageNumber}
+                            </span>
+                          </div>
+                          <div className="text-[10px] font-bold text-slate-300 truncate">
+                            {stage.shortName}
+                          </div>
+                          <div className="text-[8px] font-mono text-slate-500 truncate">
+                            {isComplete ? '100%' : isCurrent ? 'RUNNING' : 'QUEUED'}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Expandable Stage Details Breakdown */}
+                  <AnimatePresence>
+                    {expandedTimelineCardIds.includes(m.id) && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="pt-2 border-t border-slate-800/80 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 text-xs"
+                      >
+                        {PIPELINE_STAGES.slice(0, 6).map((stg) => (
+                          <div
+                            key={`substg-${stg.id}`}
+                            className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1"
+                          >
+                            <div className="flex items-center justify-between text-[11px]">
+                              <span className="font-bold text-indigo-300">
+                                S{stg.stageNumber}: {stg.shortName}
+                              </span>
+                              <span className="text-[10px] font-mono text-slate-500">
+                                {stg.agentOrEngine.split(' ')[0]}
+                              </span>
+                            </div>
+                            <p className="text-[10px] text-slate-400 line-clamp-2">
+                              {stg.description}
+                            </p>
+                          </div>
+                        ))}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
 
                 {/* Card Middle: Speaker & Time Telemetry Strip */}
@@ -986,12 +1130,12 @@ export const MeetingsTester: React.FC<MeetingsTesterProps> = ({
                     </div>
                   </div>
 
-                  {/* Process Action Button */}
+                  {/* Process Action Button with Pipeline Execution Launch */}
                   <div className="flex items-center gap-2 shrink-0">
                     <button
                       id={`btn-process-meeting-${m.id}`}
                       disabled={m.status === 'processing'}
-                      onClick={() => onProcessMeeting(m.id)}
+                      onClick={() => handleLaunchPipelineExecution(m)}
                       className={`px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all shadow-md cursor-pointer ${
                         m.status === 'processing'
                           ? 'bg-indigo-600/50 text-white cursor-not-allowed'
@@ -1121,6 +1265,23 @@ export const MeetingsTester: React.FC<MeetingsTesterProps> = ({
               </div>
             </motion.div>
           </div>
+        )}
+      </AnimatePresence>
+
+      {/* End-to-End Pipeline Execution Timeline Modal */}
+      <AnimatePresence>
+        {timelineMeeting && (
+          <MeetingPipelineTimeline
+            meeting={timelineMeeting}
+            isOpen={!!timelineMeeting}
+            onClose={() => setTimelineMeeting(null)}
+            onViewIntelligence={onViewIntelligence}
+            onPipelineComplete={(mId) => {
+              onProcessMeeting(mId);
+            }}
+            theme={theme}
+            autoStart={true}
+          />
         )}
       </AnimatePresence>
     </div>

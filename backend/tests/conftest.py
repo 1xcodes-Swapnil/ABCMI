@@ -7,6 +7,7 @@ from typing import AsyncGenerator, Generator
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
+from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -20,6 +21,7 @@ os.environ["ENVIRONMENT"] = "test"
 os.environ["DEBUG"] = "true"
 os.environ["LOG_LEVEL"] = "WARNING"
 os.environ["AUDIO_STORAGE_PATH"] = "/tmp/abcimi_test_storage"
+os.environ["ALLOW_TEST_TOKENS"] = "true"
 
 from app.core.config import Settings, get_settings
 from app.infrastructure.database import Base
@@ -38,6 +40,16 @@ def client() -> Generator[TestClient, None, None]:
     """Provides a synchronous HTTP test client for the FastAPI application."""
     with TestClient(app=app, base_url="http://testserver") as test_client:
         yield test_client
+
+
+@pytest_asyncio.fixture
+async def async_client() -> AsyncGenerator[AsyncClient, None]:
+    """Provides an async HTTPX client bound to the FastAPI ASGI app for async tests."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as ac:
+        yield ac
 
 
 @pytest_asyncio.fixture

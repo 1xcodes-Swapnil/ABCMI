@@ -158,15 +158,60 @@ class OpenMOSSProvider(ASRProvider):
                 token=self.token,
             )
             device_target = self.device if self.device != "auto" else "auto"
-            torch_dtype = torch.float16 if (self.device == "cuda" and torch.cuda.is_available()) else torch.float32
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_id,
-                trust_remote_code=True,
-                cache_dir=self.cache_dir,
-                token=self.token,
-                device_map=device_target,
-                torch_dtype=torch_dtype,
-            )
+            is_cuda = (self.device == "cuda" or device_target == "cuda") and torch.cuda.is_available()
+
+            if is_cuda:
+                # 4-bit NF4 Quantization for CUDA GPU
+                try:
+                    from transformers import BitsAndBytesConfig
+                    bnb_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_compute_dtype=torch.float16,
+                        bnb_4bit_use_double_quant=True,
+                    )
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        self.model_id,
+                        trust_remote_code=True,
+                        cache_dir=self.cache_dir,
+                        token=self.token,
+                        device_map="auto",
+                        quantization_config=bnb_config,
+                    )
+                    logger.info("REAL MODEL LOADED: Open-MOSS loaded with 4-bit CUDA quantization.")
+                except Exception as q_err:
+                    logger.warning("4-bit quantization failed, falling back to FP16: %s", q_err)
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        self.model_id,
+                        trust_remote_code=True,
+                        cache_dir=self.cache_dir,
+                        token=self.token,
+                        device_map="auto",
+                        torch_dtype=torch.float16,
+                    )
+            else:
+                # Optimized CPU execution: load lightweight float32/bfloat16 and apply dynamic INT8 quantization
+                raw_model = AutoModelForCausalLM.from_pretrained(
+                    self.model_id,
+                    trust_remote_code=True,
+                    cache_dir=self.cache_dir,
+                    token=self.token,
+                    device_map="cpu",
+                    torch_dtype=torch.float32,
+                    low_cpu_mem_usage=True,
+                )
+                try:
+                    logger.info("Applying PyTorch dynamic INT8 quantization for Open-MOSS on CPU...")
+                    self.model = torch.ao.quantization.quantize_dynamic(
+                        raw_model,
+                        {torch.nn.Linear},
+                        dtype=torch.qint8,
+                    )
+                    logger.info("REAL MODEL LOADED: Open-MOSS dynamic INT8 quantized on CPU.")
+                except Exception as q_ex:
+                    logger.warning("Dynamic INT8 quantization skipped (%s), using standard CPU model.", q_ex)
+                    self.model = raw_model
+
             OpenMOSSProvider._cached_model = self.model
             OpenMOSSProvider._cached_processor = self.processor
             OpenMOSSProvider._cached_model_key = cache_key

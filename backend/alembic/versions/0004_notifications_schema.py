@@ -19,6 +19,50 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Ensure projects table exists for foreign key references
+    op.create_table(
+        'projects',
+        sa.Column('id', sa.Uuid(), nullable=False),
+        sa.Column('name', sa.String(length=255), nullable=False),
+        sa.Column('description', sa.Text(), nullable=True),
+        sa.Column('tenant_id', sa.String(length=100), nullable=False),
+        sa.Column('status', sa.String(length=50), nullable=False, server_default='active'),
+        sa.Column('created_by', sa.String(length=150), nullable=True),
+        sa.Column('owner_id', sa.Uuid(), nullable=True),
+        sa.Column('settings', sa.JSON(), nullable=True),
+        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.ForeignKeyConstraint(['owner_id'], ['users.id'], ondelete='SET NULL'),
+        sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index('ix_projects_id', 'projects', ['id'], unique=False)
+    op.create_index('ix_projects_name', 'projects', ['name'], unique=False)
+    op.create_index('ix_projects_tenant_id', 'projects', ['tenant_id'], unique=False)
+    op.create_index('ix_projects_status', 'projects', ['status'], unique=False)
+    op.create_index('ix_projects_tenant_status', 'projects', ['tenant_id', 'status'], unique=False)
+    op.create_index('ix_projects_tenant_name', 'projects', ['tenant_id', 'name'], unique=False)
+
+    # Project-meeting association table
+    op.create_table(
+        'project_meetings',
+        sa.Column('id', sa.Uuid(), nullable=False),
+        sa.Column('project_id', sa.Uuid(), nullable=False),
+        sa.Column('meeting_id', sa.Uuid(), nullable=False),
+        sa.Column('tenant_id', sa.String(length=100), nullable=False, server_default='default'),
+        sa.Column('added_by', sa.String(length=150), nullable=True),
+        sa.Column('notes', sa.Text(), nullable=True),
+        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.ForeignKeyConstraint(['project_id'], ['projects.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['meeting_id'], ['meetings.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('project_id', 'meeting_id', name='uq_project_meeting')
+    )
+    op.create_index('ix_project_meetings_id', 'project_meetings', ['id'], unique=False)
+    op.create_index('ix_project_meetings_project_id', 'project_meetings', ['project_id'], unique=False)
+    op.create_index('ix_project_meetings_meeting_id', 'project_meetings', ['meeting_id'], unique=False)
+    op.create_index('ix_project_meetings_tenant', 'project_meetings', ['tenant_id', 'project_id'], unique=False)
+
     op.create_table(
         'notifications',
         sa.Column('id', sa.Uuid(), nullable=False),

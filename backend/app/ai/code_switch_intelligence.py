@@ -4,10 +4,15 @@ Provides multilingual code-switching detection (Hinglish, Tanglish, Spanglish, F
 language transition boundary marking, lexical normalization, and canonical semantic representation mapping.
 """
 
+import os
 from typing import Any, Dict, List, Optional
 from pydantic import Field
 
+from app.core.config import get_settings
+from app.core.logging import get_logger
 from app.schemas.base import CoreBaseModel
+
+logger = get_logger("ai.code_switch_intelligence")
 
 
 class CodeSwitchBoundary(CoreBaseModel):
@@ -58,6 +63,9 @@ class CodeSwitchIntelligenceEngine:
 
     ENGLISH_KEYWORDS = {"team", "today", "architecture", "discuss", "welcome", "meeting"}
 
+    _cached_sarvam_model = None
+    _cached_sarvam_tokenizer = None
+
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         self.config = config or {
             "primary_pair": "hi-en",
@@ -65,7 +73,76 @@ class CodeSwitchIntelligenceEngine:
             "detect_spanglish": True,
             "detect_franglais": True,
             "normalize_lexicon": True,
+            "model_id": "sarvamai/sarvam-1",
         }
+        self.model = None
+        self.tokenizer = None
+
+    def _load_sarvam_model(self) -> None:
+        """Loads and quantizes Sarvam-1 Indic LM for real text normalization."""
+        if CodeSwitchIntelligenceEngine._cached_sarvam_model is not None:
+            self.model = CodeSwitchIntelligenceEngine._cached_sarvam_model
+            self.tokenizer = CodeSwitchIntelligenceEngine._cached_sarvam_tokenizer
+            return
+
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        model_id = self.config.get("model_id", "sarvamai/sarvam-1")
+        settings = get_settings()
+        hf_token = getattr(settings, "HF_TOKEN", None)
+        is_cuda = torch.cuda.is_available()
+
+        logger.info("Initializing Quantized Sarvam-1 Indic LM (%s)...", model_id)
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_id,
+                trust_remote_code=True,
+                token=hf_token,
+            )
+
+            if is_cuda:
+                # 4-bit NF4 Quantization for GPU
+                from transformers import BitsAndBytesConfig
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.float16,
+                )
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_id,
+                    trust_remote_code=True,
+                    token=hf_token,
+                    device_map="auto",
+                    quantization_config=bnb_config,
+                )
+                logger.info("REAL MODEL LOADED: Sarvam-1 loaded with 4-bit CUDA quantization.")
+            else:
+                # Dynamic INT8 Quantization for CPU
+                raw_model = AutoModelForCausalLM.from_pretrained(
+                    model_id,
+                    trust_remote_code=True,
+                    token=hf_token,
+                    device_map="cpu",
+                    torch_dtype=torch.float32,
+                    low_cpu_mem_usage=True,
+                )
+                try:
+                    logger.info("Applying PyTorch dynamic INT8 quantization to Sarvam-1 for CPU...")
+                    self.model = torch.ao.quantization.quantize_dynamic(
+                        raw_model,
+                        {torch.nn.Linear},
+                        dtype=torch.qint8,
+                    )
+                    logger.info("REAL MODEL LOADED: Sarvam-1 dynamic INT8 quantized on CPU.")
+                except Exception as q_err:
+                    logger.warning("Dynamic INT8 quantization skipped (%s), using standard model.", q_err)
+                    self.model = raw_model
+
+            CodeSwitchIntelligenceEngine._cached_sarvam_model = self.model
+            CodeSwitchIntelligenceEngine._cached_sarvam_tokenizer = self.tokenizer
+        except Exception as ex:
+            logger.warning("Could not load real Sarvam-1 model (%s). Using heuristic pipeline fallback.", ex)
 
     async def detect_boundaries(
         self,
@@ -133,10 +210,32 @@ class CodeSwitchIntelligenceEngine:
 
     async def map_to_canonical(self, text: str) -> str:
         """
-        Translates code-switched utterance to unified canonical English representation.
+        Translates code-switched utterance to unified canonical English representation
+        using the real Sarvam-1 model (when loaded) or dictionary heuristic fallback.
         """
         if not text:
             return ""
+
+        settings = get_settings()
+        if getattr(settings, "EXECUTION_MODE", "FIXTURE").upper() == "REAL":
+            self._load_sarvam_model()
+            if self.model is not None and self.tokenizer is not None:
+                try:
+                    import torch
+                    prompt = f"Translate and normalize this mixed speech to standard English: {text}\nEnglish translation:"
+                    inputs = self.tokenizer(prompt, return_tensors="pt")
+                    with torch.no_grad():
+                        outputs = self.model.generate(
+                            **inputs,
+                            max_new_tokens=100,
+                            do_sample=False,
+                            pad_token_id=self.tokenizer.eos_token_id,
+                        )
+                    decoded = self.tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+                    if decoded:
+                        return decoded
+                except Exception as infer_err:
+                    logger.warning("Sarvam-1 neural generation failed: %s; using heuristic mapping.", infer_err)
 
         replacements = {
             "namaste": "Hello",

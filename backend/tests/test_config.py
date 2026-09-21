@@ -16,8 +16,10 @@ def test_settings_initialization(test_settings: Settings) -> None:
 
 
 def test_database_url_generation() -> None:
-    """Verify computed database URLs."""
+    """Verify computed database URLs when no explicit override env vars are set."""
+    # Use _env_file=None to bypass .env file so only kwargs govern the settings
     settings = Settings(
+        _env_file=None,
         POSTGRES_SERVER="db.example.com",
         POSTGRES_PORT=5432,
         POSTGRES_USER="testuser",
@@ -29,8 +31,10 @@ def test_database_url_generation() -> None:
 
 
 def test_redis_url_generation() -> None:
-    """Verify computed Redis connection URLs."""
+    """Verify computed Redis connection URLs when no explicit override env vars are set."""
+    # Use _env_file=None to bypass .env file so only kwargs govern the settings
     settings = Settings(
+        _env_file=None,
         REDIS_HOST="redis.example.com",
         REDIS_PORT=6379,
         REDIS_DB=1,
@@ -40,8 +44,10 @@ def test_redis_url_generation() -> None:
 
 
 def test_qdrant_url_generation() -> None:
-    """Verify computed Qdrant REST connection URLs."""
+    """Verify computed Qdrant REST connection URLs when no explicit override env vars are set."""
+    # Use _env_file=None to bypass .env file so only kwargs govern the settings
     settings_http = Settings(
+        _env_file=None,
         QDRANT_HOST="qdrant.example.com",
         QDRANT_PORT=6333,
         QDRANT_HTTPS=False,
@@ -49,6 +55,7 @@ def test_qdrant_url_generation() -> None:
     assert settings_http.qdrant_connection_url == "http://qdrant.example.com:6333"
 
     settings_https = Settings(
+        _env_file=None,
         QDRANT_HOST="qdrant.example.com",
         QDRANT_PORT=6333,
         QDRANT_HTTPS=True,

@@ -66,9 +66,17 @@ def do_run_migrations(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
+        version_table_pk=True,
     )
 
     with context.begin_transaction():
+        # Ensure alembic_version table has enough width for custom revision names
+        connection.exec_driver_sql(
+            "CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(255) NOT NULL PRIMARY KEY)"
+        )
+        connection.exec_driver_sql(
+            "ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(255)"
+        )
         context.run_migrations()
 
 
@@ -77,7 +85,7 @@ def run_migrations_online() -> None:
     from sqlalchemy import engine_from_config
 
     configuration = config.get_section(config.config_ini_section) or {}
-    configuration["sqlalchemy.url"] = config.get_main_option("sqlalchemy.url") or settings.sync_database_url
+    configuration["sqlalchemy.url"] = settings.sync_database_url or config.get_main_option("sqlalchemy.url")
 
     connectable = engine_from_config(
         configuration,
