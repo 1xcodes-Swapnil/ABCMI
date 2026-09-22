@@ -123,3 +123,9 @@ env/
 models/
 data/audio/raw/
 manifests/
+
+# Generated backend audio, reports, model caches, and cache markers
+backend/data/audio/raw/
+backend/data/audio/reports/
+backend/models--*/
+backend/CACHEDIR.TAG
