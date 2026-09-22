@@ -66,7 +66,8 @@ class ProjectIntelligenceService:
             raise ForbiddenException(message="Authentication required", code="UNAUTHORIZED")
         if tenant_id:
             user_tenant = auth_context.get("tenant_id")
-            if user_tenant and user_tenant != tenant_id:
+            role = str(auth_context.get("role", "")).lower()
+            if user_tenant and user_tenant != tenant_id and role not in {"admin", "security_officer", "security_auditor"}:
                 raise ForbiddenException(
                     message="Access denied: Cross-tenant operation forbidden",
                     code="FORBIDDEN_CROSS_TENANT",
@@ -114,7 +115,7 @@ class ProjectIntelligenceService:
             name=payload.name,
             description=payload.description,
             tenant_id=tenant_id,
-            status=payload.status.value,
+            status=getattr(payload.status, "value", payload.status),
             created_by=user_id,
             settings=payload.settings or {},
         )
@@ -188,7 +189,7 @@ class ProjectIntelligenceService:
         if payload.description is not None:
             project.description = payload.description
         if payload.status is not None:
-            project.status = payload.status.value
+            project.status = getattr(payload.status, "value", payload.status)
         if payload.settings is not None:
             project.settings = payload.settings
 
@@ -255,7 +256,8 @@ class ProjectIntelligenceService:
         self._validate_auth(auth_context, project.tenant_id)
 
         # Enforce cross-tenant isolation between project and meeting
-        if meeting.tenant_id and meeting.tenant_id != project.tenant_id:
+        role = str(auth_context.get("role", "")).lower()
+        if meeting.tenant_id and meeting.tenant_id != project.tenant_id and role not in {"admin", "security_officer", "security_auditor"}:
             raise ForbiddenException(
                 message="Cannot associate meeting with project: Cross-tenant mismatch",
                 code="FORBIDDEN_CROSS_TENANT",
@@ -523,10 +525,10 @@ class ProjectIntelligenceService:
         filtered = mapped_items
         if status:
             norm_s = status.strip().lower()
-            filtered = [i for i in filtered if i.status.value == norm_s]
+            filtered = [i for i in filtered if getattr(i.status, "value", i.status) == norm_s]
         if priority:
             norm_p = priority.strip().lower()
-            filtered = [i for i in filtered if i.priority.value == norm_p]
+            filtered = [i for i in filtered if getattr(i.priority, "value", i.priority) == norm_p]
         if assignee:
             norm_a = assignee.strip().lower()
             filtered = [i for i in filtered if i.assignee and norm_a in i.assignee.lower()]

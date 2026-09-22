@@ -19,6 +19,7 @@ from app.events.redis_bus import RedisEventBus
 from app.infrastructure.storage import get_storage_manager
 from app.models.meeting import Meeting
 from app.models.report import MeetingReport
+from app.models.user import User
 from app.repositories.meeting_repo import MeetingRepository
 from app.repositories.knowledge_object_repo import KnowledgeObjectRepository
 
@@ -173,6 +174,7 @@ class ReportGenerationService:
             report_payload = {
                 "report_id": str(report_id),
                 "meeting_id": str(meeting_id),
+                "title": "Meeting Report",
                 "tenant_id": tenant_id,
                 "report_type": report_type,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -186,6 +188,7 @@ class ReportGenerationService:
                     "correlation_id": correlation_id,
                 },
             }
+            report_payload["provenance"]["sections"] = sections
 
             # Serialize and export in requested format
             file_bytes, filename = self._export_to_format(report_payload, format_type)
@@ -202,6 +205,10 @@ class ReportGenerationService:
             )
 
             # Persist report entity
+            generated_by = None
+            if user_id is not None and await self.db.get(User, user_id) is not None:
+                generated_by = user_id
+
             report = MeetingReport(
                 id=report_id,
                 meeting_id=meeting_id,
@@ -212,7 +219,7 @@ class ReportGenerationService:
                 storage_path=storage_path,
                 file_size=file_size,
                 checksum=checksum,
-                generated_by=user_id,
+                generated_by=generated_by,
                 correlation_id=correlation_id,
                 version=1,
                 provenance=report_payload["provenance"],
@@ -361,7 +368,7 @@ class ReportGenerationService:
             status = sec.get("verification_status", "N/A")
             meta = sec.get("metadata", {})
             conf_str = f"{conf:.2f}" if isinstance(conf, (int, float)) else str(conf)
-            doc_lines.append(f"## {title}")
+            doc_lines.append(f"## {title.upper()}")
             doc_lines.append(f"   [Confidence: {conf_str} | Status: {str(status).upper()}]")
             
             raw_content = sec.get("content", "")
@@ -592,6 +599,7 @@ class ReportGenerationService:
         # We can construct a basic payload from report provenance
         meeting = await self.meeting_repo.get_by_id(report.meeting_id)
         title = meeting.title if meeting else "Meeting"
+        sections = (report.provenance or {}).get("sections") if isinstance(report.provenance, dict) else None
         payload = {
             "report_id": str(report.id),
             "meeting_id": str(report.meeting_id),
@@ -599,7 +607,7 @@ class ReportGenerationService:
             "report_type": report.report_type,
             "generated_at": report.created_at.isoformat(),
             "version": report.version,
-            "sections": [
+            "sections": sections or [
                 {"title": "Report Summary", "content": f"Meeting Report for {title}", "confidence": 1.0, "verification_status": "verified"}
             ],
             "provenance": report.provenance or {},

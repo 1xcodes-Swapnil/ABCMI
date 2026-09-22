@@ -62,7 +62,7 @@ class MeetingURLParser:
             space_id = space_match.group(1)
             return ParsedMeetingURL(
                 provider="google_meet",
-                external_meeting_id=space_id,
+                external_meeting_id=trimmed,
                 canonical_url=f"https://meet.google.com/{space_id}",
                 conference_code=space_id,
             )

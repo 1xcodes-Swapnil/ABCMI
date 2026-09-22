@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.infrastructure.database import Base, check_database_health, get_async_db, init_database
+from app.models.user import User
 from app.orchestration.ace_boundary import ACEAdaptiveBlackboardAdapter, ACERequest
 from app.orchestration.ace_engine import ACEOrchestrator
 from app.orchestration.module_runner import AIModuleRunner
@@ -254,11 +255,13 @@ async def execute_cli_pipeline(
         print(f"    Selected existing meeting ID: {meeting.id}")
     else:
         meeting_title = title or (file_info["file_name"] if file_info else "CLI Test Meeting")
+        requested_host_id = uuid.UUID(user_id_str)
+        host_id = requested_host_id if await db.get(User, requested_host_id) else None
         create_payload = MeetingCreate(
             title=meeting_title,
             description="Created via ABCI-MI CLI local meeting testing interface",
             language=language,
-            host_id=uuid.UUID(user_id_str),
+            host_id=host_id,
             settings={"mode": mode, "cli_source": True},
         )
         meeting = await meeting_service.create_meeting(create_payload, auth_context)

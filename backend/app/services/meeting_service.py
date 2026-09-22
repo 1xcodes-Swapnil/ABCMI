@@ -15,6 +15,7 @@ from app.events.redis_bus import RedisEventBus
 from app.infrastructure.storage import get_storage_manager
 from app.models.audio import Audio
 from app.models.meeting import Meeting
+from app.models.user import User
 from app.models.participant import Participant
 from app.orchestration.ace_boundary import ACERequest
 from app.repositories.audio_repo import AudioRepository
@@ -104,6 +105,8 @@ class MeetingService:
         if not host_id and auth_context and auth_context.get("user_id"):
             try:
                 host_id = uuid.UUID(auth_context["user_id"])
+                if await self.db.get(User, host_id) is None:
+                    host_id = None
             except ValueError:
                 host_id = None
 

@@ -3,6 +3,7 @@ ABCI-MI Pytest Configuration and Test Fixtures
 """
 
 import os
+import uuid
 from typing import AsyncGenerator, Generator
 import pytest
 import pytest_asyncio
@@ -24,7 +25,8 @@ os.environ["AUDIO_STORAGE_PATH"] = "/tmp/abcimi_test_storage"
 os.environ["ALLOW_TEST_TOKENS"] = "true"
 
 from app.core.config import Settings, get_settings
-from app.infrastructure.database import Base
+from app.infrastructure.database import Base, get_async_db
+from app.models.user import User
 import app.models  # Register all ORM models
 from app.main import app
 
@@ -87,5 +89,26 @@ async def db_session(async_db_engine: AsyncEngine) -> AsyncGenerator[AsyncSessio
         autoflush=False,
     )
     async with session_factory() as session:
-        yield session
-        await session.rollback()
+        session.add_all(
+            [
+                User(
+                    id=uuid.UUID(f"00000000-0000-0000-0000-{index:012d}"),
+                    email=f"fixture-{index}@abci-mi.local",
+                    full_name=f"Fixture User {index}",
+                    role="admin" if index == 1 else "member",
+                    status="active",
+                )
+                for index in range(1, 10)
+            ]
+        )
+        await session.commit()
+
+        async def override_get_async_db() -> AsyncGenerator[AsyncSession, None]:
+            yield session
+
+        app.dependency_overrides[get_async_db] = override_get_async_db
+        try:
+            yield session
+        finally:
+            app.dependency_overrides.pop(get_async_db, None)
+            await session.rollback()

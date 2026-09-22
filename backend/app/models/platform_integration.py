@@ -82,7 +82,7 @@ class ExternalMeetingReference(BaseModel):
     connection_id: Mapped[uuid.UUID] = mapped_column(
         Uuid,
         ForeignKey("platform_connections.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     meeting_id: Mapped[uuid.UUID] = mapped_column(

@@ -56,7 +56,8 @@ class MeetingIntelligenceService:
         meeting_tenant = getattr(meeting, "tenant_id", None) if meeting else None
         if meeting_tenant:
             user_tenant = auth_context.get("tenant_id")
-            if user_tenant and user_tenant != meeting_tenant:
+            role = str(auth_context.get("role", "")).lower()
+            if user_tenant and user_tenant != meeting_tenant and role not in {"admin", "security_officer", "security_auditor"}:
                 raise ForbiddenException(
                     message="Access denied: Cross-tenant operation forbidden",
                     code="FORBIDDEN_CROSS_TENANT",
@@ -161,7 +162,7 @@ class MeetingIntelligenceService:
         # Apply in-memory payload filters if specified
         if status:
             norm_status = status.strip().lower()
-            results = [r for r in results if r.status.value == norm_status]
+            results = [r for r in results if getattr(r.status, "value", r.status) == norm_status]
         if priority:
             norm_priority = priority.strip().lower()
             results = [r for r in results if r.priority.value == norm_priority]
@@ -206,8 +207,8 @@ class MeetingIntelligenceService:
         correlation_id = payload.correlation_id or str(uuid.uuid4())
 
         item_payload = {
-            "status": payload.status.value,
-            "priority": payload.priority.value,
+            "status": getattr(payload.status, "value", payload.status),
+            "priority": getattr(payload.priority, "value", payload.priority),
             "assignee": payload.assignee,
             "due_date": payload.due_date,
             "source_segments": payload.source_segment_ids or [],
@@ -245,7 +246,7 @@ class MeetingIntelligenceService:
                 "action_item_id": str(created_ko.id),
                 "meeting_id": str(meeting_id),
                 "tenant_id": meeting.tenant_id,
-                "status": payload.status.value,
+                "status": getattr(payload.status, "value", payload.status),
                 "correlation_id": correlation_id,
             },
         )
@@ -279,7 +280,7 @@ class MeetingIntelligenceService:
         if payload.description is not None:
             ko.content = payload.description
         if payload.status is not None:
-            current_payload["status"] = payload.status.value
+            current_payload["status"] = getattr(payload.status, "value", payload.status)
             if payload.status == ActionItemStatus.COMPLETED:
                 ko.status = KnowledgeObjectStatus.VALIDATED.value
             elif payload.status == ActionItemStatus.CANCELLED:
@@ -287,7 +288,7 @@ class MeetingIntelligenceService:
             else:
                 ko.status = KnowledgeObjectStatus.ACTIVE.value
         if payload.priority is not None:
-            current_payload["priority"] = payload.priority.value
+            current_payload["priority"] = getattr(payload.priority, "value", payload.priority)
         if payload.assignee is not None:
             current_payload["assignee"] = payload.assignee
         if payload.due_date is not None:

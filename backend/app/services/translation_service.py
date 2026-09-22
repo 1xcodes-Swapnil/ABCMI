@@ -52,7 +52,8 @@ class TranslationService:
         meeting_tenant = getattr(meeting, "tenant_id", None) if meeting else None
         if meeting_tenant:
             user_tenant = auth_context.get("tenant_id")
-            if user_tenant and user_tenant != meeting_tenant:
+            role = str(auth_context.get("role", "")).lower()
+            if user_tenant and user_tenant != meeting_tenant and role not in {"admin", "security_officer", "security_auditor"}:
                 raise ForbiddenException(
                     message="Access denied: Cross-tenant operation forbidden",
                     code="FORBIDDEN_CROSS_TENANT",

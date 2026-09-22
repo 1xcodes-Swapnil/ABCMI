@@ -18,7 +18,7 @@ from sqlalchemy import (
     Text,
     Uuid,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, synonym
 
 from app.models.base import BaseModel
 
@@ -65,6 +65,7 @@ class TranscriptSegment(BaseModel):
         Text,
         nullable=False,
     )
+    text = synonym("original_text")
     translated_text: Mapped[Optional[str]] = mapped_column(
         Text,
         nullable=True,
@@ -133,6 +134,7 @@ class Transcript(BaseModel):
         nullable=False,
         default="en",
     )
+    detected_language = synonym("language")
     full_text: Mapped[str] = mapped_column(
         Text,
         nullable=False,

@@ -252,7 +252,7 @@ class OpenMOSSProvider(ASRProvider):
             
             # Construct the prompt/messages
             messages = [
-                {"role": "user", "content": "<|audio|>\nTranscribe the audio and perform diarization."}
+                {"role": "user", "content": "<|audio_pad|>\nTranscribe the audio and perform diarization."}
             ]
             text = self.processor.apply_chat_template(messages, tokenize=False)
             
@@ -278,7 +278,7 @@ class OpenMOSSProvider(ASRProvider):
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=2048,
+                    max_new_tokens=512,
                     do_sample=False,
                 )
             

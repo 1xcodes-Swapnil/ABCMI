@@ -144,7 +144,7 @@ class AuditService:
         sanitized = re.sub(r"(?:/(?:backend|app|usr|etc|var|home|root)/[^\s:,]+|[A-Za-z]:\\[^\s:,]+)", "[SERVER_PATH]", sanitized)
 
         # 7. Mask exception stack traces
-        sanitized = re.sub(r"Traceback \(most recent call last\):[\s\S]*?(?:Error|Exception):[^\n]*", "[EXCEPTION_STACK_TRACE_REDACTED]", sanitized)
+        sanitized = re.sub(r"Traceback \(most recent call last\):", "[EXCEPTION_STACK_TRACE_REDACTED]", sanitized)
 
         # 8. Mask raw SQL queries if present in error strings
         sanitized = re.sub(r"\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|DROP\s+TABLE|ALTER\s+TABLE)\b[\s\S]*?;?", "[SQL_STATEMENT_REDACTED]", sanitized, flags=re.IGNORECASE)
@@ -167,7 +167,7 @@ class AuditService:
                 key_str = str(k).strip()
                 key_lower = key_str.lower()
                 # Check exact match or presence in secret key catalog
-                if key_lower in self.SECRET_KEYS or any(secret in key_lower for secret in ["secret", "password", "token", "apikey", "api_key"]):
+                if key_lower in self.SECRET_KEYS or key_lower in {"connection_string", "database_url", "redis_url", "url"} or any(secret in key_lower for secret in ["secret", "password", "token", "apikey", "api_key"]):
                     clean_dict[key_str] = "[REDACTED]"
                 else:
                     clean_dict[key_str] = self._sanitize_dict(v, depth + 1)

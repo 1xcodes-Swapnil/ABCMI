@@ -25,6 +25,15 @@ class LiveSession(BaseModel):
         nullable=False,
         index=True,
     )
+    tenant_id: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+    )
+    provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    external_meeting_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    meeting_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    session_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(
         String(50),
         nullable=False,
@@ -36,6 +45,8 @@ class LiveSession(BaseModel):
         nullable=False,
         default="en",
     )
+    media_mode: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    transcript_source: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     received_chunks_count: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -72,10 +83,13 @@ class LiveSession(BaseModel):
         DateTime(timezone=True),
         nullable=True,
     )
+    connected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    participant_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_activity_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )
+    last_event_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     correlation_id: Mapped[Optional[str]] = mapped_column(
         String(255),
         nullable=True,

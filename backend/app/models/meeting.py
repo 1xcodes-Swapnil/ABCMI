@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 import uuid
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text, Uuid
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, synonym
 
 from app.models.base import BaseModel
 
@@ -60,6 +60,7 @@ class Meeting(BaseModel):
         DateTime(timezone=True),
         nullable=True,
     )
+    start_time = synonym("scheduled_start")
     actual_start: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

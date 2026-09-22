@@ -180,7 +180,10 @@ async def download_report_file(
 
     storage = get_storage_manager()
     try:
-        file_bytes = storage.get_report_file(report.storage_path) if report.storage_path else b""
+        if target_format.lower() == report.format.lower() and report.storage_path:
+            file_bytes = storage.get_report_file(report.storage_path)
+        else:
+            file_bytes, _, _ = await service.export_report(report_id, target_format, auth_context)
     except Exception:
         # If file needs export
         file_bytes, _, _ = await service.export_report(report_id, target_format, auth_context)

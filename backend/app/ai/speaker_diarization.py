@@ -12,6 +12,9 @@ from pydantic import Field
 
 from app.schemas.base import CoreBaseModel
 from app.core.config import get_settings
+from app.core.logging import get_logger
+
+logger = get_logger("ai.speaker_diarization")
 
 
 class SpeakerVoiceprint(CoreBaseModel):
@@ -98,7 +101,7 @@ class SpeakerDiarizationEngine:
                 try:
                     pipeline = Pipeline.from_pretrained(
                         "pyannote/speaker-diarization-3.1",
-                        use_auth_token=settings.HF_TOKEN
+                        token=settings.HF_TOKEN
                     )
                     if pipeline is None:
                         logger.warning("PYANNOTE BLOCKED: PyAnnote pipeline returned None from Hugging Face.")
@@ -111,7 +114,11 @@ class SpeakerDiarizationEngine:
 
                 # 4. Perform actual inference
                 try:
-                    diarization = pipeline(tmp_path, num_speakers=expected_speakers)
+                    import soundfile as sf
+                    waveform, sample_rate = sf.read(tmp_path, dtype="float32", always_2d=True)
+                    waveform = torch.from_numpy(waveform.T)
+                    diarization_input = {"waveform": waveform, "sample_rate": sample_rate}
+                    diarization = pipeline(diarization_input, num_speakers=expected_speakers)
                     
                     turns = []
                     voiceprints = []
