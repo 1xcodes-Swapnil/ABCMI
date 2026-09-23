@@ -7,9 +7,17 @@ and CLI integration.
 
 import os
 import shutil
+import sys
 import tempfile
 import unittest
+from pathlib import Path
 from typing import Any, Dict, List
+
+# Ensure backend directory is in sys.path
+_test_dir = Path(__file__).resolve().parent
+_backend_dir = _test_dir.parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
 
 from app.benchmarks.config import BenchmarkConfig
 from app.benchmarks.dataset_registry import DatasetRegistry, get_dataset_registry

@@ -176,6 +176,69 @@ def compare_runs(run1_id: str, run2_id: str) -> int:
     return 0
 
 
+def run_download(args: argparse.Namespace) -> int:
+    """Download, prepare, and verify benchmark datasets locally."""
+    config = get_benchmark_config()
+    target_dir = os.path.abspath(args.output or config.data_cache_dir)
+    
+    try:
+        from scripts.download_benchmark_datasets import (
+            AMIDatasetPreparer,
+            AISHELLPreparer,
+            CommonVoicePreparer,
+            DIHARDPreparer,
+            VoxConversePreparer,
+            download_all_datasets,
+            verify_datasets,
+        )
+    except ImportError:
+        # Fallback path resolution
+        sys.path.insert(0, os.path.join(backend_dir, "scripts"))
+        from download_benchmark_datasets import (
+            AMIDatasetPreparer,
+            AISHELLPreparer,
+            CommonVoicePreparer,
+            DIHARDPreparer,
+            VoxConversePreparer,
+            download_all_datasets,
+            verify_datasets,
+        )
+
+    if args.verify_only:
+        verify_datasets(target_dir)
+        return 0
+
+    langs = [lang.strip() for lang in args.languages.split(",") if lang.strip()]
+    download_real = not args.offline
+
+    if args.dataset == "all":
+        download_all_datasets(
+            target_dir=target_dir,
+            samples_per_dataset=args.samples,
+            download_real=download_real,
+            force=args.force,
+            languages=langs,
+        )
+    elif args.dataset == "ami":
+        p = AMIDatasetPreparer()
+        p.prepare(target_dir, max_samples=args.samples, download_real=download_real, force=args.force)
+    elif args.dataset == "voxconverse":
+        p = VoxConversePreparer()
+        p.prepare(target_dir, max_samples=args.samples, download_real=download_real, force=args.force)
+    elif args.dataset == "aishell":
+        p = AISHELLPreparer()
+        p.prepare(target_dir, max_samples=args.samples, download_real=download_real, force=args.force)
+    elif args.dataset == "common_voice":
+        p = CommonVoicePreparer()
+        p.prepare(target_dir, languages=langs, max_samples=args.samples, download_real=download_real, force=args.force)
+    elif args.dataset == "dihard":
+        p = DIHARDPreparer()
+        p.prepare(target_dir, max_samples=args.samples, download_real=download_real, force=args.force)
+
+    verify_datasets(target_dir)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct command-line argument parser."""
     parser = argparse.ArgumentParser(
@@ -187,6 +250,54 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Command: list
     subparsers.add_parser("list", help="List registered benchmark datasets and specifications")
+
+    # Command: download
+    download_parser = subparsers.add_parser("download", help="Download and prepare benchmark datasets locally")
+    download_parser.add_argument(
+        "--dataset",
+        "-d",
+        type=str,
+        default="all",
+        choices=["all", "ami", "voxconverse", "aishell", "common_voice", "dihard"],
+        help="Dataset to download: all, ami, voxconverse, aishell, common_voice, dihard (default: all)",
+    )
+    download_parser.add_argument(
+        "--samples",
+        "-s",
+        type=int,
+        default=5,
+        help="Number of samples to download/prepare per dataset (default: 5)",
+    )
+    download_parser.add_argument(
+        "--languages",
+        "-l",
+        type=str,
+        default="en,hi,zh",
+        help="Comma-separated languages for Common Voice (e.g. en,hi,zh)",
+    )
+    download_parser.add_argument(
+        "--output",
+        "-o",
+        type=str,
+        default=None,
+        help="Output dataset cache directory (default: ./data/benchmarks)",
+    )
+    download_parser.add_argument(
+        "--force",
+        "-f",
+        action="store_true",
+        help="Force overwrite existing dataset files",
+    )
+    download_parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="Verify existing local benchmark datasets without downloading",
+    )
+    download_parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip remote HTTP downloads and prepare local calibrated test fixtures immediately",
+    )
 
     # Command: run
     run_parser = subparsers.add_parser("run", help="Run benchmark on a specific dataset")
@@ -231,6 +342,8 @@ def main():
     if args.command == "list":
         print_dataset_list()
         sys.exit(0)
+    elif args.command == "download":
+        sys.exit(run_download(args))
     elif args.command == "run":
         sys.exit(run_single_dataset(args))
     elif args.command == "run-all":

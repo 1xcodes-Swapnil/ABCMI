@@ -76,12 +76,22 @@ from app.ai.translation_engine import (
     translation_provider_registry,
     TranslationEngine,
 )
+from app.ai.moss_adapter import (
+    OpenMOSSProvider,
+    MOSSAdapter,
+    OpenMOSSAdapter,
+    get_moss_adapter,
+)
 
 __all__ = [
     "ASRSegment",
     "ASRWordTimestamp",
     "ASRResult",
     "MultilingualASREngine",
+    "OpenMOSSProvider",
+    "MOSSAdapter",
+    "OpenMOSSAdapter",
+    "get_moss_adapter",
     "CodeSwitchBoundary",
     "NormalizedRepresentation",
     "CodeSwitchIntelligenceEngine",

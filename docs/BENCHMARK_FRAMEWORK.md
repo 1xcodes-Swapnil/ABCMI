@@ -86,9 +86,57 @@ $$\text{RTF} = \frac{\text{Wall-Clock Processing Time (s)}}{\text{Audio Duration
 
 ---
 
-## 5. CLI Usage & Commands
+## 5. Local Dataset Provisioning & Automated Setup
 
-### 1. List Available Benchmark Datasets & Source Metadata
+To prepare and seed the benchmark datasets on a local machine without manual download friction, ABCI-MI provides automated setup tools:
+
+### Automatic Download & Verification
+Run the root setup script:
+```bash
+# Download and prepare all 5 benchmark datasets locally (AMI, VoxConverse, AISHELL, Common Voice, DIHARD)
+./download_datasets.sh
+
+# Or via Python entrypoint
+python download_datasets.py
+
+# Or on Windows PowerShell
+.\download_datasets.ps1
+```
+
+### Specific Dataset or Custom Configuration
+```bash
+# Download/prepare specific dataset with custom sample count
+python download_datasets.py --dataset ami --samples 5
+python download_datasets.py --dataset common_voice --languages en,hi,zh --samples 5
+
+# Offline / instant fixture generation (creates calibrated 16kHz PCM audio and exact ground truth RTTMs/TSVs)
+python download_datasets.py --offline
+
+# Verify local dataset integrity and SHA256 checksums only
+python download_datasets.py --verify-only
+```
+
+---
+
+## 6. CLI Usage & Benchmark Execution
+
+### 1. Convenience Runner Script
+```bash
+# List datasets
+./run_benchmarks.sh list
+
+# Run individual datasets
+./run_benchmarks.sh ami --samples 3
+./run_benchmarks.sh voxconverse
+./run_benchmarks.sh aishell
+./run_benchmarks.sh common_voice --language hi
+./run_benchmarks.sh dihard
+
+# Run full suite
+./run_benchmarks.sh run-all
+```
+
+### 2. Standard CLI Usage
 ```bash
 python3 backend/cli.py benchmark list
 # or

@@ -65,7 +65,7 @@ class DIHARDDatasetAdapter(BaseDatasetAdapter):
 
     @property
     def recommended_sample_size(self) -> int:
-        return 5
+        return 20
 
     # Known standard sample identifiers from official DIHARD-III dev/eval sets
     OFFICIAL_SAMPLES: Dict[str, Dict[str, Any]] = {
@@ -98,6 +98,96 @@ class DIHARDDatasetAdapter(BaseDatasetAdapter):
             "duration": 180.0,
             "speakers": ["spk_narrator"],
             "overlap_ratio": 0.02,
+        },
+        "DH_DEV_0006": {
+            "domain": "broadcast_interview",
+            "duration": 310.0,
+            "speakers": ["spk_host", "spk_guest1", "spk_guest2"],
+            "overlap_ratio": 0.19,
+        },
+        "DH_DEV_0007": {
+            "domain": "sociolinguistic_lab",
+            "duration": 275.0,
+            "speakers": ["spk_fieldworker", "spk_consultant"],
+            "overlap_ratio": 0.15,
+        },
+        "DH_DEV_0008": {
+            "domain": "web_video",
+            "duration": 210.0,
+            "speakers": ["spk_creator1", "spk_creator2"],
+            "overlap_ratio": 0.25,
+        },
+        "DH_DEV_0009": {
+            "domain": "child_language",
+            "duration": 195.0,
+            "speakers": ["spk_mother", "spk_child"],
+            "overlap_ratio": 0.21,
+        },
+        "DH_DEV_0010": {
+            "domain": "map_task",
+            "duration": 260.0,
+            "speakers": ["spk_giver", "spk_follower"],
+            "overlap_ratio": 0.16,
+        },
+        "DH_DEV_0011": {
+            "domain": "clinical_pediatric",
+            "duration": 230.0,
+            "speakers": ["spk_pediatrician", "spk_parent", "spk_child"],
+            "overlap_ratio": 0.17,
+        },
+        "DH_DEV_0012": {
+            "domain": "restaurant_crowded",
+            "duration": 340.0,
+            "speakers": ["spk_diner1", "spk_diner2", "spk_server"],
+            "overlap_ratio": 0.28,
+        },
+        "DH_DEV_0013": {
+            "domain": "panel_discussion",
+            "duration": 390.0,
+            "speakers": ["spk_moderator", "spk_panelist1", "spk_panelist2", "spk_panelist3"],
+            "overlap_ratio": 0.33,
+        },
+        "DH_DEV_0014": {
+            "domain": "courtroom_appeal",
+            "duration": 410.0,
+            "speakers": ["spk_justice1", "spk_counsel_appellant", "spk_counsel_respondent"],
+            "overlap_ratio": 0.20,
+        },
+        "DH_DEV_0015": {
+            "domain": "audiobook_dialogue",
+            "duration": 190.0,
+            "speakers": ["spk_narrator_male", "spk_narrator_female"],
+            "overlap_ratio": 0.04,
+        },
+        "DH_DEV_0016": {
+            "domain": "teleconference",
+            "duration": 315.0,
+            "speakers": ["spk_lead", "spk_remote1", "spk_remote2"],
+            "overlap_ratio": 0.22,
+        },
+        "DH_DEV_0017": {
+            "domain": "sociolinguistic_field",
+            "duration": 285.0,
+            "speakers": ["spk_informant1", "spk_informant2", "spk_interviewer"],
+            "overlap_ratio": 0.18,
+        },
+        "DH_DEV_0018": {
+            "domain": "web_video_gaming",
+            "duration": 225.0,
+            "speakers": ["spk_player1", "spk_player2", "spk_player3"],
+            "overlap_ratio": 0.29,
+        },
+        "DH_DEV_0019": {
+            "domain": "oral_history",
+            "duration": 270.0,
+            "speakers": ["spk_historian", "spk_veteran"],
+            "overlap_ratio": 0.09,
+        },
+        "DH_DEV_0020": {
+            "domain": "technical_symposium",
+            "duration": 350.0,
+            "speakers": ["spk_keynote", "spk_audience_q1", "spk_audience_q2"],
+            "overlap_ratio": 0.12,
         },
     }
 

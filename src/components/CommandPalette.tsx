@@ -15,7 +15,8 @@ import {
   ArrowRight,
   Clock,
   CheckCircle2,
-  Cpu
+  Cpu,
+  Activity
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { MeetingItem } from '../types';
@@ -79,6 +80,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     { key: 'benchmarks', label: 'Research & SOTA Benchmarks', category: 'Governance & Platform', icon: Award, desc: 'AMI, VoxConverse & AISHELL WER/DER' },
     { key: 'security', label: 'Security & Audit Governance', category: 'Governance & Platform', icon: ShieldCheck, desc: 'RBAC roles, HS256 tokens, audit ledger' },
     { key: 'api_console', label: 'API Console (47 Endpoints)', category: 'Governance & Platform', icon: Terminal, desc: 'Interactive REST API tester' },
+    { key: 'system_health', label: 'System Health & Telemetry', category: 'Governance & Platform', icon: Activity, desc: 'Real-time CPU, memory, latency & subsystem metrics' },
   ];
 
   const filteredNav = navItems.filter(item =>

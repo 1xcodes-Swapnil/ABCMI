@@ -636,6 +636,7 @@ export const ALL_API_ENDPOINTS: EndpointDef[] = [
   { method: 'GET', path: '/api/v1/health/liveness', category: 'Health', description: 'Application liveness probe for orchestrators', rbac: 'Public', phase: 'Phase 1' },
   { method: 'GET', path: '/api/v1/health/readiness', category: 'Health', description: 'Postgres, Redis, and Qdrant readiness matrix', rbac: 'Public', phase: 'Phase 1' },
   { method: 'GET', path: '/api/v1/health/system', category: 'Health', description: 'Comprehensive diagnostic component matrix', rbac: 'Public', phase: 'Phase 1' },
+  { method: 'GET', path: '/api/v1/health/system-metrics', category: 'Health', description: 'Real-time CPU, memory, P95/P99 latency, and subsystem telemetry', rbac: 'Public', phase: 'Phase 4.27' },
   // Auth
   { method: 'POST', path: '/api/v1/auth/login', category: 'Authentication', description: 'Authenticate user & issue HS256 cryptographic JWT', rbac: 'Public', phase: 'Phase 4.25', sampleBody: '{\n  "email": "user@abci-mi.org",\n  "password": "SecurePassword123!"\n}' },
   { method: 'GET', path: '/api/v1/auth/me', category: 'Authentication', description: 'Retrieve authenticated claims and organization profile', rbac: 'Authenticated', phase: 'Phase 4.25' },

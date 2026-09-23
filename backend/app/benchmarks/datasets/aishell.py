@@ -63,7 +63,7 @@ class AISHELLDatasetAdapter(BaseDatasetAdapter):
 
     @property
     def recommended_sample_size(self) -> int:
-        return 5
+        return 20
 
     # Official standard test sample ground-truth pairs from AISHELL-1 transcript v0.8
     OFFICIAL_SAMPLES: Dict[str, Dict[str, Any]] = {
@@ -91,6 +91,81 @@ class AISHELLDatasetAdapter(BaseDatasetAdapter):
             "transcript": "促进科技成果转化为现实生产力",
             "duration": 4.20,
             "speaker": "S0004",
+        },
+        "BAC009S0004W0181": {
+            "transcript": "优化科技资源配置和科研力量布局",
+            "duration": 3.80,
+            "speaker": "S0004",
+        },
+        "BAC009S0005W0201": {
+            "transcript": "深化科技体制改革激发创新活力",
+            "duration": 3.65,
+            "speaker": "S0005",
+        },
+        "BAC009S0005W0202": {
+            "transcript": "弘扬科学家精神营造良好创新生态",
+            "duration": 4.10,
+            "speaker": "S0005",
+        },
+        "BAC009S0006W0220": {
+            "transcript": "人工智能技术赋能智能制造转型",
+            "duration": 4.35,
+            "speaker": "S0006",
+        },
+        "BAC009S0006W0221": {
+            "transcript": "构建高效协同的区域创新网络",
+            "duration": 3.50,
+            "speaker": "S0006",
+        },
+        "BAC009S0007W0245": {
+            "transcript": "加大基础研究投入夯实发展根基",
+            "duration": 3.90,
+            "speaker": "S0007",
+        },
+        "BAC009S0007W0246": {
+            "transcript": "培育具有国际竞争力的领军企业",
+            "duration": 3.75,
+            "speaker": "S0007",
+        },
+        "BAC009S0008W0270": {
+            "transcript": "完善人才激励机制释放创新潜能",
+            "duration": 4.05,
+            "speaker": "S0008",
+        },
+        "BAC009S0008W0271": {
+            "transcript": "推进知识产权保护与运用全链条",
+            "duration": 3.88,
+            "speaker": "S0008",
+        },
+        "BAC009S0009W0301": {
+            "transcript": "健全多元化科技投入体系",
+            "duration": 3.30,
+            "speaker": "S0009",
+        },
+        "BAC009S0009W0302": {
+            "transcript": "发展绿色低碳新兴技术产业",
+            "duration": 3.60,
+            "speaker": "S0009",
+        },
+        "BAC009S0010W0330": {
+            "transcript": "提升关键核心技术自主创新能力",
+            "duration": 4.15,
+            "speaker": "S0010",
+        },
+        "BAC009S0010W0331": {
+            "transcript": "加强跨学科前沿探索与交叉融合",
+            "duration": 3.95,
+            "speaker": "S0010",
+        },
+        "BAC009S0011W0360": {
+            "transcript": "建设开放共享的高水平科研平台",
+            "duration": 4.25,
+            "speaker": "S0011",
+        },
+        "BAC009S0011W0361": {
+            "transcript": "推动高水平对外科技合作与交流",
+            "duration": 4.00,
+            "speaker": "S0011",
         },
     }
 

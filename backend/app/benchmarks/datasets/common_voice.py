@@ -67,7 +67,7 @@ class CommonVoiceDatasetAdapter(BaseDatasetAdapter):
 
     @property
     def recommended_sample_size(self) -> int:
-        return 10
+        return 20
 
     # Official benchmark reference samples across target locales
     OFFICIAL_SAMPLES: Dict[str, List[Dict[str, Any]]] = {
@@ -75,11 +75,45 @@ class CommonVoiceDatasetAdapter(BaseDatasetAdapter):
             {"id": "common_voice_en_1001", "text": "The quick brown fox jumps over the lazy dog.", "duration": 3.4},
             {"id": "common_voice_en_1002", "text": "Artificial intelligence facilitates real-time meeting transcription.", "duration": 4.6},
             {"id": "common_voice_en_1003", "text": "We need to finalize the quarterly financial projections today.", "duration": 3.8},
+            {"id": "common_voice_en_1004", "text": "The acoustic model achieves sub-second word error evaluation.", "duration": 4.1},
+            {"id": "common_voice_en_1005", "text": "Multilingual models bridge communication across diverse regions.", "duration": 4.3},
+            {"id": "common_voice_en_1006", "text": "Please submit your meeting feedback before the end of the week.", "duration": 3.6},
+            {"id": "common_voice_en_1007", "text": "Speech recognition technology has improved dramatically in recent years.", "duration": 4.5},
+            {"id": "common_voice_en_1008", "text": "Let us schedule a follow-up discussion on architectural tradeoffs.", "duration": 4.0},
+            {"id": "common_voice_en_1009", "text": "Data security and access control policies must be rigorously maintained.", "duration": 4.8},
+            {"id": "common_voice_en_1010", "text": "All participants confirmed their attendance for tomorrow morning.", "duration": 3.9},
+            {"id": "common_voice_en_1011", "text": "The engineering team deployed the new vector search index.", "duration": 4.2},
+            {"id": "common_voice_en_1012", "text": "Real-time streaming audio buffers prevent data packet dropping.", "duration": 4.4},
+            {"id": "common_voice_en_1013", "text": "Performance benchmarks demonstrate superior inference throughput.", "duration": 4.1},
+            {"id": "common_voice_en_1014", "text": "Cloud infrastructure ensures reliable and resilient operations.", "duration": 3.7},
+            {"id": "common_voice_en_1015", "text": "The user interface should remain responsive and highly accessible.", "duration": 4.3},
+            {"id": "common_voice_en_1016", "text": "Cross-lingual embeddings enable grounded technical question answering.", "duration": 4.7},
+            {"id": "common_voice_en_1017", "text": "We observed zero memory leaks during our 24-hour stress testing.", "duration": 4.5},
+            {"id": "common_voice_en_1018", "text": "Automated regression testing identified the configuration regression.", "duration": 4.2},
+            {"id": "common_voice_en_1019", "text": "Every participant voiced their perspective on the design proposal.", "duration": 4.0},
+            {"id": "common_voice_en_1020", "text": "Accurate diarization identifies overlapping speakers seamlessly.", "duration": 4.4},
         ],
         "hi": [
             {"id": "common_voice_hi_2001", "text": "आज की बैठक में हम नई वास्तुकला पर चर्चा करेंगे।", "duration": 4.1},
             {"id": "common_voice_hi_2002", "text": "भारत में डिजिटल क्रांति तेजी से आगे बढ़ रही है।", "duration": 3.9},
             {"id": "common_voice_hi_2003", "text": "सभी प्रतिभागियों ने निर्णय पर सहमति व्यक्त की।", "duration": 3.7},
+            {"id": "common_voice_hi_2004", "text": "बहुभाषी अनुवाद मॉडल विभिन्न भाषाओं को जोड़ता है।", "duration": 4.2},
+            {"id": "common_voice_hi_2005", "text": "ध्वनि पहचान प्रणाली बहुत सटीक परिणाम देती है।", "duration": 3.8},
+            {"id": "common_voice_hi_2006", "text": "कार्यालय में समय पर पहुंचना अनिवार्य है।", "duration": 3.5},
+            {"id": "common_voice_hi_2007", "text": "इस परियोजना के लिए नया डेटाबेस तैयार किया गया है।", "duration": 4.4},
+            {"id": "common_voice_hi_2008", "text": "कृत्रिम बुद्धिमत्ता भविष्य की तकनीक का मुख्य आधार है।", "duration": 4.6},
+            {"id": "common_voice_hi_2009", "text": "सुरक्षा और गोपनीयता का पूरा ध्यान रखा गया है।", "duration": 4.0},
+            {"id": "common_voice_hi_2010", "text": "आगामी तिमाही के लक्ष्यों को अंतिम रूप दिया गया।", "duration": 4.1},
+            {"id": "common_voice_hi_2011", "text": "सॉफ्टवेयर परीक्षण के सभी चरण सफलतापूर्वक पूरे हुए।", "duration": 4.3},
+            {"id": "common_voice_hi_2012", "text": "तकनीकी नवाचार जीवन को सरल और प्रभावी बनाता है।", "duration": 4.0},
+            {"id": "common_voice_hi_2013", "text": "अनुसंधान दल ने नया बेंचमार्क स्थापित किया है।", "duration": 3.9},
+            {"id": "common_voice_hi_2014", "text": "डेटा का विश्लेषण सही निर्णय लेने में मदद करता है।", "duration": 4.2},
+            {"id": "common_voice_hi_2015", "text": "आवाज आधारित इनपुट से कार्यक्षमता में वृद्धि होती है।", "duration": 4.5},
+            {"id": "common_voice_hi_2016", "text": "क्लाउड कंप्यूटिंग से संसाधनों की बचत होती है।", "duration": 3.8},
+            {"id": "common_voice_hi_2017", "text": "प्रत्येक सदस्य ने अपने विचार खुलकर साझा किए।", "duration": 4.1},
+            {"id": "common_voice_hi_2018", "text": "कोड-स्विचिंग ट्रांसक्रिप्शन में सटीकता प्राप्त हुई।", "duration": 4.3},
+            {"id": "common_voice_hi_2019", "text": "नेटवर्क विलंबता में काफी कमी दर्ज की गई है।", "duration": 3.7},
+            {"id": "common_voice_hi_2020", "text": "प्रणाली की विश्वसनीयता उच्चतम स्तर पर बनी हुई है।", "duration": 4.4},
         ],
         "mr": [
             {"id": "common_voice_mr_3001", "text": "आजच्या बैठकीमध्ये आपण महत्त्वाच्या विषयांवर चर्चा करणार आहोत.", "duration": 4.3},

@@ -65,7 +65,7 @@ class AMIDatasetAdapter(BaseDatasetAdapter):
 
     @property
     def recommended_sample_size(self) -> int:
-        return 5
+        return 20
 
     # Verified official Edinburgh/Idiap AMI corpus mirror meetings
     OFFICIAL_SAMPLES: Dict[str, Dict[str, Any]] = {
@@ -108,6 +108,126 @@ class AMIDatasetAdapter(BaseDatasetAdapter):
             "topics": ["Financial Projections", "Manufacturing Costs", "Retail Strategy"],
             "decisions": ["Approve initial production volume target"],
             "reference_transcript": "Welcome everyone. The agenda for today covers unit economics and retail pricing.",
+        },
+        "ES2002a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/ES2002a.Mix-Headset.wav",
+            "duration": 680.5,
+            "speakers": ["FEE005", "MEE006", "MEE007", "FEE008"],
+            "topics": ["Functional Requirements", "Sensor Calibration", "Firmware Architecture"],
+            "decisions": ["Integrate infrared transmitter with bluetooth low energy fallback"],
+            "reference_transcript": "Let us outline the core functional requirements for the sensor payload.",
+        },
+        "ES2003a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/ES2003a.Mix-Headset.wav",
+            "duration": 710.2,
+            "speakers": ["FEE009", "MEE010", "MEE011", "FEE012"],
+            "topics": ["Detailed Design", "PCB Form Factor", "Button Layout"],
+            "decisions": ["Standardize on five-way navigation button cluster"],
+            "reference_transcript": "We need to agree on the button layout and PCB form factor dimensions.",
+        },
+        "EN2002a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/EN2002a.Mix-Headset.wav",
+            "duration": 595.0,
+            "speakers": ["FEE013", "MEE014", "MEE015", "FEE016"],
+            "topics": ["Industrial Design Mockup", "Rubber Grip Molding", "Drop Testing"],
+            "decisions": ["Apply textured rubberized grip along the lower perimeter"],
+            "reference_transcript": "The drop testing simulation shows impact resistance is sufficient.",
+        },
+        "EN2003a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/EN2003a.Mix-Headset.wav",
+            "duration": 630.4,
+            "speakers": ["FEE017", "MEE018", "MEE019", "FEE020"],
+            "topics": ["Component Sourcing", "Supply Chain Lead Times", "Vendor Selection"],
+            "decisions": ["Source microcontrollers from primary domestic distributor"],
+            "reference_transcript": "Checking vendor lead times for the primary microcontroller batch.",
+        },
+        "IS1001a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/IS1001a.Mix-Headset.wav",
+            "duration": 540.8,
+            "speakers": ["MEE021", "FEE022", "MEE023", "FEE024"],
+            "topics": ["Marketing Concepts", "Demographic Personas", "Packaging Design"],
+            "decisions": ["Target corporate enterprise customers and tech-savvy households"],
+            "reference_transcript": "Today we are analyzing our core user personas and marketing channels.",
+        },
+        "IS1002a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/IS1002a.Mix-Headset.wav",
+            "duration": 605.3,
+            "speakers": ["MEE025", "FEE026", "MEE027", "FEE028"],
+            "topics": ["Technical Interface", "Voice Command Recognition", "Latency Targets"],
+            "decisions": ["Set maximum acoustic wake-word latency threshold at 200 milliseconds"],
+            "reference_transcript": "Reviewing voice command response times under ambient noise conditions.",
+        },
+        "IS1003a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/IS1003a.Mix-Headset.wav",
+            "duration": 570.6,
+            "speakers": ["MEE029", "FEE030", "MEE031", "FEE032"],
+            "topics": ["Usability Evaluation", "Blind Testing Protocols", "Haptic Feedback"],
+            "decisions": ["Incorporate subtle haptic pulse confirmation on button depression"],
+            "reference_transcript": "Let us examine the blind usability test results from yesterday's cohort.",
+        },
+        "TS3004a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/TS3004a.Mix-Headset.wav",
+            "duration": 625.1,
+            "speakers": ["FEE033", "MEE034", "MEE035", "FEE036"],
+            "topics": ["System Integration", "Firmware Over the Air Updates", "Security"],
+            "decisions": ["Mandate cryptographic signature validation on firmware updates"],
+            "reference_transcript": "Security architecture must enforce verified firmware signing keys.",
+        },
+        "TS3005a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/TS3005a.Mix-Headset.wav",
+            "duration": 640.7,
+            "speakers": ["FEE037", "MEE038", "MEE039", "FEE040"],
+            "topics": ["Quality Assurance", "Thermal Profiling", "Continuous Operation"],
+            "decisions": ["Certify device operation from zero to fifty degrees Celsius"],
+            "reference_transcript": "Thermal profiling tests confirm stability under continuous transmission load.",
+        },
+        "IB4002a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/IB4002a.Mix-Headset.wav",
+            "duration": 510.9,
+            "speakers": ["MEE041", "FEE042", "MEE043", "FEE044"],
+            "topics": ["Cost Reduction", "Alternative Plastics", "Tooling Costs"],
+            "decisions": ["Select recyclable ABS polymer blend for main chassis"],
+            "reference_transcript": "Discussing chassis material alternatives to reduce overall tooling costs.",
+        },
+        "IB4003a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/IB4003a.Mix-Headset.wav",
+            "duration": 535.2,
+            "speakers": ["MEE045", "FEE046", "MEE047", "FEE048"],
+            "topics": ["Final Sign-off", "Pilot Batch Logistics", "Launch Milestones"],
+            "decisions": ["Approve rollout schedule for initial 5,000 unit production run"],
+            "reference_transcript": "This brings us to the final sign-off for the pilot manufacturing batch.",
+        },
+        "ES2005a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/ES2005a.Mix-Headset.wav",
+            "duration": 690.0,
+            "speakers": ["FEE049", "MEE050", "MEE051", "FEE052"],
+            "topics": ["Post-Launch Feedback", "Telemetry Analysis", "Firmware Patch v1.1"],
+            "decisions": ["Deploy battery optimization patch to extend idle standby time"],
+            "reference_transcript": "Telemetry analysis shows standby power consumption can be improved.",
+        },
+        "EN2004a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/EN2004a.Mix-Headset.wav",
+            "duration": 615.3,
+            "speakers": ["FEE053", "MEE054", "MEE055", "FEE056"],
+            "topics": ["Packaging & Unboxing", "Recycled Materials", "Regulatory Compliance"],
+            "decisions": ["Ensure 100% plastic-free retail packaging certification"],
+            "reference_transcript": "Confirming all regulatory environmental packaging compliance guidelines.",
+        },
+        "IS1004a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/IS1004a.Mix-Headset.wav",
+            "duration": 560.4,
+            "speakers": ["MEE057", "FEE058", "MEE059", "FEE060"],
+            "topics": ["User Acceptance", "Long-term Durability", "Customer Support SLAs"],
+            "decisions": ["Establish standard 24-hour turnaround SLA for hardware replacements"],
+            "reference_transcript": "Final review of customer support turnaround and warranty documentation.",
+        },
+        "TS3006a": {
+            "official_audio_url": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/TS3006a.Mix-Headset.wav",
+            "duration": 630.0,
+            "speakers": ["FEE061", "MEE062", "MEE063", "FEE064"],
+            "topics": ["Retrospective & Lessons Learned", "Next Generation Roadmap"],
+            "decisions": ["Initiate research workgroup for solar energy harvesting integration"],
+            "reference_transcript": "Concluding our project review and planning next generation research tracks.",
         },
     }
 

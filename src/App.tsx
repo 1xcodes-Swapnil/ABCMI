@@ -58,12 +58,13 @@ import { ReportTester } from './components/ReportTester';
 import { AdminAuditTester } from './components/AdminAuditTester';
 import { ApiConsoleTester } from './components/ApiConsoleTester';
 import { ResearchBenchmarkViewer } from './components/ResearchBenchmarkViewer';
+import { SystemHealthDashboard } from './components/SystemHealthDashboard';
 
 export default function App() {
   // State Management
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [activeTab, setActiveTab] = useState<
-    'meetings' | 'live_stream' | 'intelligence' | 'queries' | 'knowledge' | 'translations' | 'reports' | 'benchmarks' | 'security' | 'api_console'
+    'meetings' | 'live_stream' | 'intelligence' | 'queries' | 'knowledge' | 'translations' | 'reports' | 'benchmarks' | 'security' | 'api_console' | 'system_health'
   >('meetings');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
@@ -441,7 +442,7 @@ export default function App() {
 
   interface NavItem {
     id: string;
-    key: 'meetings' | 'live_stream' | 'intelligence' | 'queries' | 'knowledge' | 'translations' | 'reports' | 'benchmarks' | 'security' | 'api_console';
+    key: 'meetings' | 'live_stream' | 'intelligence' | 'queries' | 'knowledge' | 'translations' | 'reports' | 'benchmarks' | 'security' | 'api_console' | 'system_health';
     label: string;
     shortLabel: string;
     icon: any;
@@ -569,6 +570,16 @@ export default function App() {
           color: 'text-indigo-400',
           badge: '47 APIs',
           description: 'REST OpenAPI interactive tester'
+        },
+        {
+          id: 'tab-system-health',
+          key: 'system_health',
+          label: 'System Health & Telemetry',
+          shortLabel: 'System Health',
+          icon: Activity,
+          color: 'text-emerald-400',
+          badge: 'Live',
+          description: 'Real-time CPU, memory, latency & subsystem metrics'
         }
       ]
     }
@@ -988,6 +999,12 @@ export default function App() {
                   <ApiConsoleTester
                     endpoints={ALL_API_ENDPOINTS}
                     activeMeetingId={selectedMeeting.id}
+                  />
+                )}
+
+                {activeTab === 'system_health' && (
+                  <SystemHealthDashboard
+                    theme={theme}
                   />
                 )}
               </motion.div>
