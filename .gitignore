@@ -129,3 +129,5 @@ backend/data/audio/raw/
 backend/data/audio/reports/
 backend/models--*/
 backend/CACHEDIR.TAG
+e2e_validation/
+benchmark_diarization.rttm
