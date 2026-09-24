@@ -100,6 +100,7 @@ class Settings(BaseSettings):
     REDIS_SOCKET_TIMEOUT: float = 5.0
     REDIS_MAX_CONNECTIONS: int = 50
     REDIS_URL: Optional[str] = None
+    REDIS_REST_TOKEN: Optional[str] = None  # Upstash Redis REST API token
 
     @property
     def redis_connection_url(self) -> str:

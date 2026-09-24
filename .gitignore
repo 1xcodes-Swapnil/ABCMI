@@ -133,3 +133,10 @@ backend/models--*/
 backend/CACHEDIR.TAG
 e2e_validation/
 benchmark_diarization.rttm
+
+# Benchmark results, model weight extensions, and large binary artifacts
+benchmark_results/
+*.safetensors
+*.pt
+*.pth
+*.bin

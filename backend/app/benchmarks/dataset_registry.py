@@ -11,6 +11,9 @@ from app.benchmarks.datasets.voxconverse import VoxConverseDatasetAdapter
 from app.benchmarks.datasets.dihard import DIHARDDatasetAdapter
 from app.benchmarks.datasets.aishell import AISHELLDatasetAdapter
 from app.benchmarks.datasets.common_voice import CommonVoiceDatasetAdapter
+from app.benchmarks.datasets.fleurs import FLEURSDatasetAdapter
+from app.benchmarks.datasets.indicsuperb import IndicSUPERBDatasetAdapter
+from app.benchmarks.datasets.mucs import MUCSDatasetAdapter
 
 
 class DatasetRegistry:
@@ -27,6 +30,9 @@ class DatasetRegistry:
         self.register_adapter(DIHARDDatasetAdapter())
         self.register_adapter(AISHELLDatasetAdapter())
         self.register_adapter(CommonVoiceDatasetAdapter())
+        self.register_adapter(FLEURSDatasetAdapter())
+        self.register_adapter(IndicSUPERBDatasetAdapter())
+        self.register_adapter(MUCSDatasetAdapter())
 
     def register_adapter(self, adapter: BaseDatasetAdapter) -> None:
         """Register a new dataset adapter."""

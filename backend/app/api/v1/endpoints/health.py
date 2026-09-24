@@ -6,8 +6,12 @@ Provides system status, infrastructure dependency checks, and liveness/readiness
 import asyncio
 from datetime import datetime
 import os
-import resource
 import sys
+try:
+    import resource  # Unix only
+    _HAS_RESOURCE = True
+except ImportError:
+    _HAS_RESOURCE = False  # Windows — resource module unavailable
 import time
 from typing import Any, Dict
 from fastapi import APIRouter, status
@@ -186,8 +190,12 @@ async def get_system_metrics() -> JSONResponse:
 
     # 2. Process RSS
     try:
-        rusage = resource.getrusage(resource.RUSAGE_SELF)
-        mem_info["process_rss_mb"] = round(rusage.ru_maxrss / 1024.0, 1)
+        if _HAS_RESOURCE:
+            rusage = resource.getrusage(resource.RUSAGE_SELF)
+            mem_info["process_rss_mb"] = round(rusage.ru_maxrss / 1024.0, 1)
+        else:
+            import psutil
+            mem_info["process_rss_mb"] = round(psutil.Process().memory_info().rss / 1024 / 1024, 1)
     except Exception:
         mem_info["process_rss_mb"] = 256.0
 
