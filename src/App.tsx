@@ -59,6 +59,7 @@ import { AdminAuditTester } from './components/AdminAuditTester';
 import { ApiConsoleTester } from './components/ApiConsoleTester';
 import { ResearchBenchmarkViewer } from './components/ResearchBenchmarkViewer';
 import { SystemHealthDashboard } from './components/SystemHealthDashboard';
+import { ProfileSettingsModal } from './components/ProfileSettingsModal';
 
 export default function App() {
   // State Management
@@ -88,6 +89,7 @@ export default function App() {
   const [notifications, setNotifications] = useState<NotificationItem[]>(INITIAL_NOTIFICATIONS);
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>(INITIAL_AUDIT_LOGS);
   const [showNotificationsModal, setShowNotificationsModal] = useState(false);
+  const [isProfileSettingsOpen, setIsProfileSettingsOpen] = useState(false);
 
   const selectedMeeting = meetings.find(m => m.id === selectedMeetingId) || meetings[0];
   const activeIntelligence = intelligenceMap[selectedMeetingId];
@@ -600,6 +602,15 @@ export default function App() {
         theme={theme}
         onToggleTheme={() => setTheme(t => (t === 'dark' ? 'light' : 'dark'))}
         onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
+        onOpenProfileSettings={() => setIsProfileSettingsOpen(true)}
+        onSwitchRole={handleSwitchRole}
+        onNavigateTab={setActiveTab}
+        onRefreshSessionToken={() => {
+          const newToken = `jwt-hs256-refreshed-${Date.now().toString(36)}`;
+          setAuth(prev => ({ ...prev, token: newToken }));
+          addAuditLog('SECURITY_TOKEN_REFRESH', 'auth_context', auth.user_id, 'SUCCESS', JSON.stringify({ token: newToken }));
+        }}
+        activeTabTitle={NAV_CATEGORIES.flatMap(c => c.items).find(i => i.key === activeTab)?.label}
       />
 
       {/* Command Palette Modal */}
@@ -617,28 +628,24 @@ export default function App() {
       <main id="app-main-content" className="w-full max-w-[1760px] mx-auto px-4 sm:px-6 lg:px-8 py-5">
         {/* Mobile Header Menu Bar */}
         <div
-          className={`md:hidden flex items-center justify-between border rounded-2xl p-3 mb-4 backdrop-blur-md ${
-            theme === 'dark' ? 'bg-slate-900/80 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900 shadow-xs'
+          className={`md:hidden flex items-center justify-between border rounded-xl p-3 mb-4 backdrop-blur-md ${
+            theme === 'dark' ? 'bg-slate-900/90 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900 shadow-xs'
           }`}
         >
-          <div className="flex items-center space-x-2">
-            <span className={`text-xs font-semibold ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>Current View:</span>
-            <span
-              className={`text-xs font-bold uppercase tracking-wider px-2.5 py-1 rounded-lg border ${
-                theme === 'dark' ? 'bg-indigo-950/80 text-indigo-300 border-indigo-800/60' : 'bg-indigo-50 text-indigo-700 border-indigo-200'
-              }`}
-            >
+          <div className="flex items-center space-x-2 truncate">
+            <span className={`text-xs ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>View:</span>
+            <span className="text-xs font-semibold text-slate-900 dark:text-white truncate">
               {NAV_CATEGORIES.flatMap(c => c.items).find(i => i.key === activeTab)?.label}
             </span>
           </div>
           <button
             onClick={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
               theme === 'dark' ? 'bg-slate-800 text-slate-200 hover:text-white border-slate-700' : 'bg-slate-100 text-slate-800 hover:bg-slate-200 border-slate-200'
             }`}
           >
-            <Menu className={`w-4 h-4 ${theme === 'dark' ? 'text-indigo-400' : 'text-indigo-600'}`} />
-            <span>{isMobileSidebarOpen ? 'Close' : 'Modules'}</span>
+            <Menu className="w-4 h-4 text-slate-400" />
+            <span>{isMobileSidebarOpen ? 'Close' : 'Navigation'}</span>
           </button>
         </div>
 
@@ -649,24 +656,24 @@ export default function App() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="md:hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex flex-col p-4"
+              className="md:hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex flex-col p-4"
             >
               <div
-                className={`border rounded-2xl p-4 flex-1 overflow-y-auto space-y-4 shadow-2xl ${
-                  theme === 'dark' ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+                className={`border rounded-2xl p-5 flex-1 overflow-y-auto space-y-5 shadow-2xl ${
+                  theme === 'dark' ? 'bg-slate-950 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
                 }`}
               >
-                <div className={`flex items-center justify-between border-b pb-3 ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
-                  <div className="flex items-center space-x-2">
-                    <Workflow className={`w-5 h-5 ${theme === 'dark' ? 'text-indigo-400' : 'text-indigo-600'}`} />
+                <div className={`flex items-center justify-between border-b pb-3.5 ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
+                  <div className="flex items-center space-x-2.5">
+                    <Workflow className="w-4 h-4 text-slate-400" />
                     <div>
-                      <h3 className="text-sm font-bold">ABCI-MI Navigation</h3>
-                      <p className={`text-[11px] ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>13-Module Meeting Intelligence Engine</p>
+                      <h3 className="text-sm font-semibold tracking-tight">ABCI-MI Workspace</h3>
+                      <p className={`text-[11px] ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>Enterprise Meeting Intelligence</p>
                     </div>
                   </div>
                   <button
                     onClick={() => setIsMobileSidebarOpen(false)}
-                    className={`p-2 rounded-xl ${theme === 'dark' ? 'bg-slate-800 text-slate-400 hover:text-white' : 'bg-slate-100 text-slate-600 hover:text-slate-900'}`}
+                    className={`p-1.5 rounded-lg ${theme === 'dark' ? 'hover:bg-slate-800 text-slate-400' : 'hover:bg-slate-100 text-slate-600'}`}
                   >
                     <X className="w-4 h-4" />
                   </button>
@@ -674,11 +681,11 @@ export default function App() {
 
                 <div className="space-y-4">
                   {NAV_CATEGORIES.map(category => (
-                    <div key={category.title} className="space-y-1.5">
-                      <div className={`text-[10px] font-bold uppercase tracking-wider px-2 ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>
+                    <div key={category.title} className="space-y-1">
+                      <div className={`text-[11px] font-semibold uppercase tracking-wider px-2 py-1 ${theme === 'dark' ? 'text-slate-500' : 'text-slate-400'}`}>
                         {category.title}
                       </div>
-                      <div className="space-y-1">
+                      <div className="space-y-0.5">
                         {category.items.map(item => {
                           const IconComponent = item.icon;
                           const isActive = activeTab === item.key;
@@ -690,27 +697,21 @@ export default function App() {
                                 setActiveTab(item.key);
                                 setIsMobileSidebarOpen(false);
                               }}
-                              className={`w-full flex items-center justify-between p-2.5 rounded-xl text-left transition-all ${
+                              className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-left transition-colors ${
                                 isActive
-                                  ? 'bg-indigo-600 text-white font-semibold shadow-md shadow-indigo-600/30'
+                                  ? theme === 'dark'
+                                    ? 'bg-slate-800 text-white font-medium'
+                                    : 'bg-slate-100 text-slate-900 font-medium'
                                   : theme === 'dark'
-                                  ? 'bg-slate-950/60 text-slate-300 hover:bg-slate-800 border border-slate-800/60'
-                                  : 'bg-slate-50 text-slate-800 hover:bg-slate-100 border border-slate-200'
+                                  ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
                               }`}
                             >
-                              <div className="flex items-center space-x-2.5">
-                                <IconComponent className={`w-4 h-4 ${isActive ? 'text-white' : item.color}`} />
-                                <span className="text-xs">{item.label}</span>
+                              <div className="flex items-center space-x-2.5 min-w-0">
+                                <IconComponent className={`w-4 h-4 shrink-0 ${isActive ? 'text-indigo-400' : 'text-slate-400'}`} />
+                                <span className="text-xs truncate">{item.label}</span>
                               </div>
-                              <span
-                                className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold ${
-                                  isActive
-                                    ? 'bg-indigo-800 text-white'
-                                    : theme === 'dark'
-                                    ? 'bg-slate-800 text-slate-400'
-                                    : 'bg-slate-200 text-slate-600'
-                                }`}
-                              >
+                              <span className="text-[11px] font-mono tabular-nums text-slate-400 ml-2">
                                 {item.badge}
                               </span>
                             </button>
@@ -726,15 +727,15 @@ export default function App() {
         </AnimatePresence>
 
         {/* Layout Container: Animated Sidebar + Main Viewport */}
-        <div className="flex items-start gap-5">
+        <div className="flex items-start gap-6">
           {/* Animated Desktop Sidebar */}
           <motion.aside
-            animate={{ width: isSidebarCollapsed ? 84 : 310 }}
-            transition={{ type: 'spring', stiffness: 320, damping: 30 }}
-            className={`hidden md:flex flex-col shrink-0 rounded-2xl p-3.5 backdrop-blur-xl sticky top-20 self-start max-h-[calc(100vh-6.5rem)] overflow-y-auto overflow-x-hidden shadow-xl ${
+            animate={{ width: isSidebarCollapsed ? 76 : 280 }}
+            transition={{ type: 'spring', stiffness: 350, damping: 32 }}
+            className={`hidden md:flex flex-col shrink-0 rounded-xl p-3 backdrop-blur-md sticky top-20 self-start max-h-[calc(100vh-6.5rem)] overflow-y-auto overflow-x-hidden border transition-colors ${
               theme === 'dark'
-                ? 'bg-slate-900/80 border border-slate-800/90 shadow-indigo-950/20 text-white'
-                : 'bg-white border border-slate-200/90 shadow-slate-200/60 text-slate-900'
+                ? 'bg-slate-900/60 border-slate-800/80 text-white'
+                : 'bg-white border-slate-200/90 text-slate-900 shadow-xs'
             }`}
           >
             {/* Sidebar Collapse Toggle Header */}
@@ -746,23 +747,23 @@ export default function App() {
                   exit={{ opacity: 0 }}
                   className="flex items-center space-x-2 overflow-hidden"
                 >
-                  <Workflow className={`w-4 h-4 shrink-0 ${theme === 'dark' ? 'text-indigo-400' : 'text-indigo-600'}`} />
-                  <span className={`text-xs font-bold tracking-tight truncate ${theme === 'dark' ? 'text-white' : 'text-slate-900'}`}>
-                    Framework Modules
+                  <Workflow className="w-3.5 h-3.5 shrink-0 text-slate-400" />
+                  <span className={`text-xs font-semibold tracking-tight truncate ${theme === 'dark' ? 'text-slate-200' : 'text-slate-800'}`}>
+                    Workspace Navigation
                   </span>
                 </motion.div>
               )}
               <button
                 onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
                 title={isSidebarCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
-                className={`p-1.5 rounded-lg border transition-colors ml-auto ${
+                className={`p-1.5 rounded-md transition-colors ml-auto ${
                   theme === 'dark'
-                    ? 'bg-slate-950 hover:bg-slate-800 border-slate-800 text-slate-400 hover:text-white'
-                    : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-600 hover:text-slate-900'
+                    ? 'hover:bg-slate-800 text-slate-400 hover:text-white'
+                    : 'hover:bg-slate-100 text-slate-500 hover:text-slate-900'
                 }`}
               >
                 {isSidebarCollapsed ? (
-                  <PanelLeftOpen className={`w-4 h-4 ${theme === 'dark' ? 'text-indigo-400' : 'text-indigo-600'}`} />
+                  <PanelLeftOpen className="w-4 h-4 text-slate-400" />
                 ) : (
                   <PanelLeftClose className="w-4 h-4 text-slate-400" />
                 )}
@@ -777,80 +778,71 @@ export default function App() {
                     <motion.div
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
-                      className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 select-none ${
-                        theme === 'dark' ? 'text-slate-400' : 'text-slate-500'
+                      className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 select-none ${
+                        theme === 'dark' ? 'text-slate-500' : 'text-slate-400'
                       }`}
                     >
                       {category.title}
                     </motion.div>
                   )}
 
-                  <div className="space-y-1">
+                  <div className="space-y-0.5">
                     {category.items.map(item => {
                       const IconComponent = item.icon;
                       const isActive = activeTab === item.key;
 
                       return (
-                        <motion.button
+                        <button
                           key={item.key}
                           id={item.id}
                           onClick={() => setActiveTab(item.key)}
-                          whileHover={{ x: isSidebarCollapsed ? 0 : 2 }}
-                          whileTap={{ scale: 0.98 }}
                           title={isSidebarCollapsed ? `${item.label} (${item.badge})` : undefined}
                           className={`relative w-full flex items-center ${
-                            isSidebarCollapsed ? 'justify-center px-0 py-2.5' : 'justify-between px-3 py-2.5'
-                          } rounded-xl text-xs font-medium transition-all group overflow-hidden ${
+                            isSidebarCollapsed ? 'justify-center px-0 py-2' : 'justify-between px-2.5 py-2'
+                          } rounded-lg text-xs font-medium transition-colors group overflow-hidden ${
                             isActive
-                              ? 'text-white font-semibold'
+                              ? theme === 'dark'
+                                ? 'bg-slate-800 text-white font-semibold'
+                                : 'bg-slate-100 text-slate-950 font-semibold'
                               : theme === 'dark'
-                              ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-                              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                              ? 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
+                              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
                           }`}
                         >
-                          {/* Animated Active Backdrop Indicator */}
+                          {/* Left Accent indicator when active */}
                           {isActive && (
-                            <motion.div
-                              layoutId="activeSidebarIndicator"
-                              className={`absolute inset-0 rounded-xl ${
-                                theme === 'dark'
-                                  ? 'bg-indigo-600 shadow-md shadow-indigo-600/30'
-                                  : 'bg-indigo-600 shadow-md shadow-indigo-600/25'
-                              }`}
-                              initial={false}
-                              transition={{ type: 'spring', stiffness: 380, damping: 30 }}
-                            />
+                            <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-indigo-500 rounded-r" />
                           )}
 
                           {/* Button Content */}
-                          <div className="relative z-10 flex items-center space-x-2.5 min-w-0">
+                          <div className="flex items-center space-x-2.5 min-w-0">
                             <IconComponent
-                              className={`w-4 h-4 shrink-0 transition-transform group-hover:scale-110 ${
-                                isActive ? 'text-white' : item.color
+                              className={`w-4 h-4 shrink-0 transition-colors ${
+                                isActive
+                                  ? 'text-indigo-500 dark:text-indigo-400'
+                                  : 'text-slate-400 group-hover:text-slate-300'
                               }`}
                             />
                             {!isSidebarCollapsed && (
                               <div className="text-left truncate">
-                                <div className="truncate text-xs leading-snug">{item.label}</div>
+                                <span className="truncate text-xs leading-snug">{item.label}</span>
                               </div>
                             )}
                           </div>
 
-                          {/* Status Badge */}
+                          {/* Status Count/Badge as Unboxed Tabular Text */}
                           {!isSidebarCollapsed && (
                             <span
-                              className={`relative z-10 text-[10px] px-2 py-0.5 rounded-full font-mono font-bold shrink-0 ml-1.5 ${
+                              className={`text-[11px] font-mono tabular-nums shrink-0 ml-2 ${
                                 isActive
-                                  ? 'bg-indigo-800/80 text-white'
-                                  : theme === 'dark'
-                                  ? 'bg-slate-950 text-slate-400 border border-slate-800 group-hover:border-slate-700'
-                                  : 'bg-slate-100 text-slate-600 border border-slate-200'
+                                  ? 'text-slate-300 dark:text-slate-300 font-medium'
+                                  : 'text-slate-400 dark:text-slate-500'
                               }`}
                             >
                               {item.badge}
                             </span>
                           )}
-                        </motion.button>
+                        </button>
                       );
                     })}
                   </div>
@@ -863,18 +855,20 @@ export default function App() {
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                className={`mt-4 pt-3 border-t px-2 space-y-1 text-[10px] font-mono ${
+                className={`mt-4 pt-3 border-t px-2 space-y-1 text-[11px] ${
                   theme === 'dark' ? 'border-slate-800/80 text-slate-400' : 'border-slate-200 text-slate-500'
                 }`}
               >
-                <div className="flex items-center justify-between">
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    ACE Orchestrator
+                <div className="flex items-center justify-between text-xs">
+                  <span className="flex items-center gap-1.5 text-slate-400 dark:text-slate-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                    ACE Engine
                   </span>
-                  <span className="text-emerald-500 font-bold">ONLINE</span>
+                  <span className="text-emerald-500 font-mono text-[10px] font-medium">Nominal</span>
                 </div>
-                <div className="text-slate-400">Open-MOSS &bull; PyAnnote</div>
+                <div className="text-[10px] text-slate-500 dark:text-slate-500">
+                  ABCI-MI Platform &bull; Enterprise
+                </div>
               </motion.div>
             )}
           </motion.aside>
@@ -1078,6 +1072,30 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Profile & Account Settings Modal */}
+      <ProfileSettingsModal
+        isOpen={isProfileSettingsOpen}
+        onClose={() => setIsProfileSettingsOpen(false)}
+        auth={auth}
+        onUpdateProfile={(updated) => {
+          setAuth(prev => ({ ...prev, ...updated }));
+          addAuditLog('USER_PROFILE_UPDATE', 'user_profile', auth.user_id, 'SUCCESS', JSON.stringify(updated));
+        }}
+        onResetProfile={() => {
+          setAuth({
+            token: 'jwt-hs256-mock-token-sample',
+            user_id: '00000000-0000-0000-0000-000000000001',
+            user_name: 'Swapnil Jee',
+            user_email: 'swapniljee5205@gmail.com',
+            role: 'admin',
+            tenant_id: 'default-tenant'
+          });
+          addAuditLog('USER_PROFILE_RESET', 'user_profile', auth.user_id, 'SUCCESS', '{"action": "factory_reset"}');
+        }}
+        theme={theme}
+        auditLogs={auditLogs}
+      />
     </div>
   );
 }

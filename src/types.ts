@@ -266,6 +266,14 @@ export interface AuthContext {
   user_email: string;
   role: 'host' | 'admin' | 'member' | 'security_officer';
   tenant_id: string;
+  avatar_url?: string;
+  department?: string;
+  bio?: string;
+  phone?: string;
+  timezone?: string;
+  locale?: string;
+  created_at?: string;
+  last_login?: string;
 }
 
 export type DomainCategory = 'business' | 'education' | 'healthcare' | 'legal' | 'customer_support' | 'research';

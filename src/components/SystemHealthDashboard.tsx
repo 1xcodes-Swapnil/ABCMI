@@ -469,10 +469,10 @@ export const SystemHealthDashboard: React.FC<SystemHealthDashboardProps> = ({ th
     <div id="system-health-dashboard" className="space-y-6">
       {/* 1. Header Toolbar with Live Stream Controls */}
       <div
-        className={`rounded-2xl border p-5 backdrop-blur-md transition-all shadow-xs ${
+        className={`rounded-xl border p-5 backdrop-blur-md transition-colors ${
           theme === 'dark'
             ? 'bg-slate-900/80 border-slate-800 text-slate-100'
-            : 'bg-white border-slate-200 text-slate-900'
+            : 'bg-white border-slate-200 text-slate-900 shadow-xs'
         }`}
       >
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
@@ -480,19 +480,19 @@ export const SystemHealthDashboard: React.FC<SystemHealthDashboardProps> = ({ th
           <div className="space-y-1">
             <div className="flex items-center space-x-3">
               <div
-                className={`p-2 rounded-xl ${
+                className={`p-2 rounded-lg ${
                   theme === 'dark' ? 'bg-emerald-950/60 text-emerald-400' : 'bg-emerald-50 text-emerald-600'
                 }`}
               >
                 <Activity className="w-5 h-5 animate-pulse" />
               </div>
               <div>
-                <h1 className="text-xl font-bold tracking-tight">System Health & Infrastructure Telemetry</h1>
+                <h1 className="text-xl font-bold tracking-tight">System Health &amp; Infrastructure Telemetry</h1>
                 {/* Clean unboxed metadata with subtle typographic separators */}
-                <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 font-mono mt-0.5">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400 font-mono mt-0.5">
                   <span className="flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-                    <span className="text-emerald-500 font-semibold">ALL SYSTEMS OPERATIONAL</span>
+                    <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                    <span className="text-emerald-500 font-semibold">ALL SYSTEMS NOMINAL</span>
                   </span>
                   <span aria-hidden="true">·</span>
                   <span>Uptime 99.98%</span>
@@ -507,9 +507,9 @@ export const SystemHealthDashboard: React.FC<SystemHealthDashboardProps> = ({ th
 
           {/* Interactive Controls Bar */}
           <div className="flex flex-wrap items-center gap-2.5">
-            {/* Time Window Buttons (Functional interactive button tabs) */}
+            {/* Time Window Buttons */}
             <div
-              className={`flex items-center p-1 rounded-xl border ${
+              className={`flex items-center p-1 rounded-lg border ${
                 theme === 'dark' ? 'bg-slate-950 border-slate-800' : 'bg-slate-100 border-slate-200'
               }`}
             >
@@ -517,7 +517,7 @@ export const SystemHealthDashboard: React.FC<SystemHealthDashboardProps> = ({ th
                 <button
                   key={w}
                   onClick={() => setTimeWindow(w)}
-                  className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-all ${
+                  className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
                     timeWindow === w
                       ? theme === 'dark'
                         ? 'bg-slate-800 text-white shadow-xs'
@@ -532,7 +532,7 @@ export const SystemHealthDashboard: React.FC<SystemHealthDashboardProps> = ({ th
 
             {/* Refresh Rate Selector */}
             <div
-              className={`flex items-center p-1 rounded-xl border ${
+              className={`flex items-center p-1 rounded-lg border ${
                 theme === 'dark' ? 'bg-slate-950 border-slate-800' : 'bg-slate-100 border-slate-200'
               }`}
             >
@@ -544,7 +544,7 @@ export const SystemHealthDashboard: React.FC<SystemHealthDashboardProps> = ({ th
                 <button
                   key={opt.val}
                   onClick={() => setRefreshIntervalMs(opt.val)}
-                  className={`px-2 py-1 text-xs font-medium rounded-lg transition-all ${
+                  className={`px-2 py-1 text-xs font-medium rounded-md transition-colors ${
                     refreshIntervalMs === opt.val
                       ? theme === 'dark'
                         ? 'bg-indigo-600 text-white font-semibold shadow-xs'
@@ -560,13 +560,13 @@ export const SystemHealthDashboard: React.FC<SystemHealthDashboardProps> = ({ th
             {/* Live Stream Pause / Resume */}
             <button
               onClick={() => setIsStreaming(!isStreaming)}
-              className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
+              className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
                 isStreaming
                   ? theme === 'dark'
-                    ? 'bg-emerald-950/50 border-emerald-800 text-emerald-300 hover:bg-emerald-900/50'
+                    ? 'bg-slate-800 border-slate-700 text-emerald-400 hover:bg-slate-700'
                     : 'bg-emerald-50 border-emerald-300 text-emerald-800 hover:bg-emerald-100'
                   : theme === 'dark'
-                  ? 'bg-amber-950/50 border-amber-800 text-amber-300 hover:bg-amber-900/50'
+                  ? 'bg-slate-800 border-slate-700 text-amber-400 hover:bg-slate-700'
                   : 'bg-amber-50 border-amber-300 text-amber-800 hover:bg-amber-100'
               }`}
               title={isStreaming ? 'Pause streaming updates' : 'Resume real-time telemetry'}
@@ -588,7 +588,7 @@ export const SystemHealthDashboard: React.FC<SystemHealthDashboardProps> = ({ th
             <button
               onClick={handleRunDiagnosticProbe}
               disabled={isProbing}
-              className={`flex items-center space-x-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition-all shadow-xs ${
+              className={`flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors shadow-xs ${
                 isProbing
                   ? 'opacity-70 cursor-not-allowed bg-slate-800 border-slate-700 text-slate-400'
                   : theme === 'dark'
@@ -603,7 +603,7 @@ export const SystemHealthDashboard: React.FC<SystemHealthDashboardProps> = ({ th
             {/* Export JSON Button */}
             <button
               onClick={handleExportTelemetry}
-              className={`flex items-center space-x-1 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${
+              className={`flex items-center space-x-1 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                 theme === 'dark'
                   ? 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200'
                   : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-700'
