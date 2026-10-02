@@ -282,24 +282,33 @@ class ACEOrchestrator:
         self.execution_monitor.record_start(task.task_id, capability=target_capability)
 
         try:
+            task_input = dict(task.input_data)
+            task_input["upstream_results"] = {
+                completed.required_capability: dict(completed.metadata)
+                for completed in blackboard.list_tasks()
+                if completed.status == TaskStatus.COMPLETED
+            }
             # Module execution call
             output = await self.module_runner.execute_task(
                 capability=target_capability,
                 task_id=task.task_id,
                 meeting_id=meeting_id,
                 request_id=request_id,
-                input_data=task.input_data,
+                input_data=task_input,
                 correlation_id=correlation_id,
             )
 
-            confidence_score = output.get("confidence_score", 0.90)
+            confidence_score = output.get("confidence_score")
             result_data = output.get("result_data", {})
 
             # Confidence Evaluation & Verification Flow
             min_thresh = self.policy_manager.get_policy("min_confidence_threshold", 0.70)
-            is_valid_confidence = self.confidence_evaluator.evaluate_task_confidence(
-                task, confidence_score
-            )
+            # Unreported model confidence is unknown, not a numeric score or a failure.
+            # Preserve that state for consumers; only evaluate measured scores.
+            if confidence_score is None:
+                result_data["confidence_status"] = "NOT_VERIFIED"
+            is_valid_confidence = (confidence_score is None or
+                self.confidence_evaluator.evaluate_task_confidence(task, confidence_score))
 
             if not is_valid_confidence:
                 logger.warning(
@@ -320,6 +329,19 @@ class ACEOrchestrator:
                 logger.info(f"Verification passed for low-confidence task {task.task_id}")
 
             # Mark task completed
+            from app.core.config import get_settings
+            if target_capability == "knowledge_memory" and get_settings().EXECUTION_MODE.upper() == "REAL":
+                if not self.blackboard_adapter or not auth_context:
+                    raise RuntimeError("REAL knowledge persistence requires the authorized SKW boundary")
+                stored_objects = []
+                for obj in result_data.get("knowledge_objects", []):
+                    stored_objects.append(await self.blackboard_adapter.store_knowledge_object(
+                        meeting_id=meeting_id, object_type=obj["object_type"], content=obj["content"],
+                        source_module="meeting_understanding", confidence_score=obj.get("confidence"),
+                        auth_context=auth_context, correlation_id=correlation_id, knowledge_data=obj))
+                if not stored_objects:
+                    raise RuntimeError("REAL knowledge persistence returned no stored objects")
+                result_data.update(canonical_stored=True, persistence_status="COMMITTED", stored_objects=stored_objects)
             blackboard.record_task_completed(task.task_id, result_data=result_data)
             self.execution_monitor.record_completion(
                 task.task_id,
@@ -340,7 +362,8 @@ class ACEOrchestrator:
             await self._publish_event(channel, comp_event)
 
             # Store Knowledge Memory output to SKW if applicable
-            if target_capability == "knowledge_memory" and self.blackboard_adapter and auth_context:
+            if (target_capability == "knowledge_memory" and self.blackboard_adapter and auth_context
+                    and get_settings().EXECUTION_MODE.upper() != "REAL"):
                 try:
                     stored_obj = await self.blackboard_adapter.store_knowledge_object(
                         meeting_id=meeting_id,

@@ -137,3 +137,30 @@
 - **Next Steps & Debt**: 
   - Expand speaker assignment models to support active voice-print registries in the database.
 
+
+
+## 2026-10-02 — Local REAL transcript integration and Phase 1 validation
+
+- Prior verified short production transcript: ES2014a 71–81 s, three real MOSS segments; actual PyAnnote; all 13 ACE tasks; PostgreSQL commit/fresh-session read-back and CLI success. Processing 60.6572947 s. Separate short two-chunk ASR passed. One cached English FLEURS record scored WER 5.2632%, CER 1.2346%; no dataset-wide accuracy claim.
+- Phase 1 under unchanged 600 s / 30 s settings: real ES2004a, 1049.3546875 s; required two chunks. Actual MOSS CUDA OOM on first chunk. Actual PyAnnote completed (264 turns, four speakers). Existing runtime requested repeated identical attempts; exact validation process stopped to prevent further waste. No mock/CPU substitution or downloads.
+- PHASE 1 BLOCKED: no reconstructed transcript, canonical persistence, Qdrant indexing or final CLI success. Fresh process confirmed no committed meeting/transcript for this failed attempt. Prior short success does not verify Phase 1.
+- Persistent evidence and all observed IDs: e2e_validation/runs/phase1_20261001T202409Z_11de0a732350; execution_log.md and CHECKPOINT.md appended. Full report: e2e_validation\artifacts\phase1_20261001T202409Z_11de0a732350_report.md.
+- Minimal changes: expose actual chunk metadata/speaker mapping in existing ASR provenance and retain mapping/dedup count at existing persistence boundary; evidence recorder setup errors fixed. Changed modules syntax-checked; no successful multi-chunk persistence claim.
+- Next action: smaller GPU-safe chunk configuration or larger GPU, then Phase 1 only. Phase 2 and later phases not started. Speaker/semantic accuracy and full dataset coverage remain unverified.
+
+## 2026-10-02 — Full-application Kaggle REAL notebook delivery
+
+- User confirmed full-application notebook scope. Reference sucess1.ipynb inspected; original retained. Prior local Phase 1 CUDA OOM evidence retained; completed inference was not repeated.
+- Built notebooks/ABCI_MI_Full_Application_Kaggle_REAL.ipynb: 21 cells, 10 code cells, 181 embedded backend source files. Uses existing production CLI/providers/ACE/Blackboard/SKW/PostgreSQL/Redis/Qdrant; full original audio, configured chunk probe, only distinct smaller probes after actual OOM, fresh-process read-back and archived evidence.
+- Minimal supporting fixes: persist meeting intake before worker execution; versioned real chunk transcript journals with audio/model/config identity; stop identical CUDA OOM recovery retries; configurable MOSS generation budget with explicit truncation rejection; bounded per-turn Sarvam generation; reject REAL Qdrant in-memory fallback and requested Sarvam CUDA-to-CPU fallback. Runtime behavior of these new changes is NOT VERIFIED by syntax checks.
+- Artifact checks PASSED: all notebook code cells and embedded Python compile; source archive/file integrity/current source match; private credential exclusion. nbformat schema validation NOT AVAILABLE in builder interpreter. No downloads, audio/model inference, service calls or benchmark runs during artifact checks.
+- Notebook SHA-256: 6393eac06861594f867aac04c81924df2e12077770926062e5e939bf6b9e03ec. Source archive SHA-256: 73dee01c9803f82312b21cdab9207a01996b778d5c7e1237c9bec34bdca9b2e0. Source HEAD: 80541c5b4e4cbc55c9298ddb72675cf233505576 plus current uncommitted source snapshot.
+- Build evidence: e2e_validation/diagnostics/kaggle_notebook_build_20261002T063956Z.json. Builder/worker/validator: backend/scripts/build_kaggle_notebook.py, kaggle_real_runner.py, validate_kaggle_notebook.py. Existing validation recorder extended; no unrelated Git changes removed.
+- Kaggle execution NOT EXECUTED; full production END-TO-END NOT VERIFIED. External next action: run uploaded notebook on Kaggle GPU with actual full audio, authorized HF access and reachable existing services/schema/user. Actual overlap will BLOCK if source separation is required, since existing separation provider is unconfigured. No Phase 2/benchmarks initiated.
+
+## 2026-10-02 — Kaggle execution fixes and source publication
+
+- User-reported Kaggle evidence: configuration passed; dependency bootstrap needed --without-pip plus existing pip --python bootstrap and wrapt; direct Supabase IPv6 endpoint failed, Session pooler IPv4 reachable; PostgreSQL/SKW/Redis/Qdrant service gate passed; six required model inventories complete. These are user-reported runtime results, not independently executed by this local agent.
+- Persisted notebook fixes: versioned evidence filenames preserve rerun history; configuration details use distinct filename; cache directory permits reuse; venv avoids unavailable ensurepip. Notebook rebuilt and 10 code cells/181 embedded source files compile; source hashes and credential exclusion pass. Notebook SHA-256 a6efb81359e8b1ebccf7b126382949d717a40407dc223c26158e6335c8fa44ef.
+- Current Kaggle gate: actual mounted audio selection BLOCKED; actual audio paths/reason needed next. No Kaggle REAL inference or full transcript claimed. Do not repeat passed setup, services or provisioning.
+- User authorized Git commit and push of required implementation/notebook files. Audio, model caches, local secrets and raw execution transcripts are excluded from this publication. Existing architecture remains embedded into the notebook; git clone is optional, not required for its execution.

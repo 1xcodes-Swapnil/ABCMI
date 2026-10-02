@@ -122,6 +122,137 @@ class AIModuleRunner:
 
             # Handle REAL production execution flow for core acoustic modules
             if exec_mode == "REAL":
+                if cap == "knowledge_memory":
+                    upstream = input_data.get("upstream_results", {})
+                    objects = upstream.get("meeting_understanding", {}).get("knowledge_objects", [])
+                    if not objects or any(not obj.get("content") for obj in objects):
+                        raise ValueError("REAL knowledge memory requires grounded non-empty knowledge objects")
+                    return {"status": "SUCCESS", "capability": cap, "confidence_score": None,
+                            "result_data": {"knowledge_objects": objects, "persistence_status": "PENDING",
+                                            "canonical_stored": False}, "correlation_id": correlation_id}
+                if cap == "meeting_analytics":
+                    from app.ai.meeting_analytics import MeetingAnalyticsEngine
+                    upstream = input_data.get("upstream_results", {})
+                    result = MeetingAnalyticsEngine().compute_analytics(uuid.UUID(str(meeting_id)),
+                        speaker_turns=upstream.get("speaker_representation", {}).get("speaker_turns"),
+                        meeting_duration_seconds=upstream.get("audio_intelligence", {}).get("duration_seconds", 0),
+                        confidence_scores=[], knowledge_objects=upstream.get("meeting_understanding", {}).get("knowledge_objects", []),
+                        correlation_id=correlation_id)
+                    return {"status": "SUCCESS", "capability": cap, "confidence_score": None,
+                            "result_data": result.model_dump(mode="json"), "correlation_id": correlation_id}
+                if cap == "meeting_understanding":
+                    from app.ai.meeting_understanding import MeetingUnderstandingEngine
+                    upstream = input_data.get("upstream_results", {})
+                    transcript = upstream.get("multilingual_asr", {}).get("transcript")
+                    if not transcript:
+                        raise ValueError("REAL meeting understanding requires the actual transcript")
+                    context = upstream.get("context_intelligence", {}).get("metadata", {})
+                    result = await MeetingUnderstandingEngine().analyze_meeting(uuid.UUID(str(meeting_id)),
+                        transcript, context_data=context, correlation_id=correlation_id, use_fixture=False)
+                    return {"status": "SUCCESS", "capability": cap, "confidence_score": result.overall_confidence,
+                            "result_data": result.model_dump(mode="json"), "correlation_id": correlation_id}
+                if cap == "verification_engine":
+                    from app.ai.verification_engine import VerificationEngine
+                    upstream = input_data.get("upstream_results", {})
+                    transcript = upstream.get("multilingual_asr", {}).get("transcript")
+                    if not transcript:
+                        raise ValueError("REAL verification requires actual transcript data")
+                    _, result = VerificationEngine().evaluate_output(uuid.UUID(str(meeting_id)),
+                        "transcript_insight", transcript,
+                        upstream.get("confidence_fusion", {}).get("fused_confidence"),
+                        correlation_id=correlation_id, payload={"execution_mode": "REAL"})
+                    return {"status": "SUCCESS", "capability": cap, "confidence_score": result.confidence_score,
+                            "result_data": result.model_dump(mode="json"), "correlation_id": correlation_id}
+                if cap == "context_intelligence":
+                    from app.ai.context_intelligence import ContextIntelligenceEngine
+                    from app.ai.transcript_intelligence import TranscriptIntelligenceResult
+                    transcript = TranscriptIntelligenceResult.model_validate(
+                        input_data.get("upstream_results", {}).get("transcript_intelligence", {}))
+                    result = await ContextIntelligenceEngine().extract_context(transcript,
+                        meeting_id=uuid.UUID(str(meeting_id)), correlation_id=correlation_id)
+                    return {"status": "SUCCESS", "capability": cap, "confidence_score": result.overall_confidence,
+                            "result_data": result.model_dump(mode="json"), "correlation_id": correlation_id}
+                if cap == "confidence_fusion":
+                    from app.ai.confidence_fusion import ConfidenceFusionEngine
+                    upstream = input_data.get("upstream_results", {})
+                    measured_asr = [s["confidence"] for s in upstream.get("multilingual_asr", {}).get("segments", [])
+                                    if s.get("confidence") is not None]
+                    result = ConfidenceFusionEngine().fuse_signals(uuid.UUID(str(meeting_id)), {
+                        "asr_confidence": sum(measured_asr)/len(measured_asr) if measured_asr else None,
+                        "diarization_confidence": upstream.get("speaker_representation", {}).get("diarization_confidence"),
+                    }, correlation_id=correlation_id)
+                    return {"status": "SUCCESS", "capability": cap, "confidence_score": result.fused_confidence,
+                            "result_data": result.model_dump(mode="json"), "correlation_id": correlation_id}
+                if cap == "transcript_intelligence":
+                    from app.ai.multilingual_asr import ASRResult, ASRSegment
+                    from app.ai.transcript_intelligence import TranscriptIntelligenceEngine
+                    upstream = input_data.get("upstream_results", {})
+                    asr = upstream.get("multilingual_asr", {})
+                    segments = [ASRSegment.model_validate(s) for s in asr.get("segments", [])]
+                    if not segments:
+                        raise ValueError("REAL transcript intelligence requires actual ASR segments")
+                    asr_result = ASRResult(meeting_id=uuid.UUID(str(meeting_id)),
+                        full_transcript=asr["transcript"], segments=segments, overall_confidence=None,
+                        metadata={"model_name": settings.OPENMOSS_MODEL_ID, "provenance": "REAL MOSS"})
+                    result = await TranscriptIntelligenceEngine().process_transcript(asr_result, correlation_id=correlation_id)
+                    if not result.cleaned_segments:
+                        raise ValueError("REAL transcript intelligence produced no segments")
+                    return {"status": "SUCCESS", "capability": cap, "confidence_score": result.overall_confidence,
+                            "result_data": result.model_dump(mode="json"), "correlation_id": correlation_id}
+                if cap == "timestamp_intelligence":
+                    import math
+                    upstream = input_data.get("upstream_results", {})
+                    segments = upstream.get("multilingual_asr", {}).get("segments", [])
+                    duration = upstream.get("audio_intelligence", {}).get("duration_seconds")
+                    if not segments or duration is None:
+                        raise ValueError("REAL timestamp validation requires ASR segments and audio duration")
+                    previous_start = -1.0
+                    for segment in segments:
+                        start, end = segment["start_time"], segment["end_time"]
+                        if not (math.isfinite(start) and math.isfinite(end) and
+                                0 <= start < end <= duration and start >= previous_start):
+                            raise ValueError("REAL ASR timestamps are invalid or out of order")
+                        previous_start = start
+                    return {"status": "SUCCESS", "capability": cap, "confidence_score": None,
+                            "result_data": {"segments": segments, "timestamps_valid": True,
+                                            "validated_segment_count": len(segments)},
+                            "correlation_id": correlation_id}
+                if cap == "code_switch_intelligence":
+                    from app.ai.code_switch_intelligence import CodeSwitchIntelligenceEngine
+                    upstream = input_data.get("upstream_results", {})
+                    transcript = upstream.get("multilingual_asr", {}).get("transcript")
+                    if not transcript:
+                        raise ValueError("REAL code-switch normalization requires the ASR transcript")
+                    observed_segments = upstream.get("multilingual_asr", {}).get("segments", [])
+                    if not observed_segments:
+                        raise ValueError("REAL normalization requires actual ASR turns")
+                    engine = CodeSwitchIntelligenceEngine()
+                    normalized_turns = []
+                    for segment in observed_segments:
+                        original = segment.get("transcript", "")
+                        if not original.strip():
+                            continue
+                        normalized_turns.append({"segment_id": segment.get("segment_id"),
+                            "original_text": original, "canonical_text": await engine.map_to_canonical(original),
+                            "inference": dict(getattr(engine, "last_inference", {}))})
+                    if not normalized_turns:
+                        raise ValueError("REAL normalization returned no actual turns")
+                    canonical = " ".join(turn["canonical_text"] for turn in normalized_turns)
+                    return {"status": "SUCCESS", "capability": cap, "confidence_score": None,
+                            "result_data": {"original_text": transcript, "canonical_text": canonical,
+                                            "normalized_turns": normalized_turns,
+                                            "model": "sarvamai/sarvam-1", "language_detection": "NOT_VERIFIED"},
+                            "correlation_id": correlation_id}
+                if cap == "overlap_resolution":
+                    from app.ai.overlap_resolution import OverlapResolutionEngine
+                    upstream = input_data.get("upstream_results", {})
+                    result = await OverlapResolutionEngine().resolve_overlaps(
+                        meeting_id=uuid.UUID(str(meeting_id)),
+                        diarization_turns=upstream.get("speaker_representation", {}).get("speaker_turns"))
+                    return {"status": "SUCCESS", "capability": cap, "confidence_score": None,
+                            "result_data": result.model_dump(mode="json"), "correlation_id": correlation_id}
+                if cap not in {"audio_intelligence", "multilingual_asr", "speaker_representation"}:
+                    raise RuntimeError(f"REAL handler is not implemented for capability '{cap}'.")
                 try:
                     from pathlib import Path
                     import os
@@ -185,10 +316,11 @@ class AIModuleRunner:
                             "confidence_score": asr_res.overall_confidence,
                             "result_data": {
                                 "transcript": asr_res.full_transcript,
-                                "language": asr_res.detected_languages[0] if asr_res.detected_languages else "en",
+                                "language": asr_res.detected_languages[0] if asr_res.detected_languages else None,
                                 "segments": [s.model_dump() for s in asr_res.segments],
                                 "detected_languages": asr_res.detected_languages,
                                 "language_distribution": asr_res.language_distribution,
+                                "metadata": asr_res.metadata,
                             },
                             "correlation_id": correlation_id,
                         }
@@ -213,6 +345,7 @@ class AIModuleRunner:
                                 "diarization_confidence": sd_res.overall_confidence,
                                 "speaker_turns": [t.model_dump() for t in sd_res.speaker_turns],
                                 "voiceprints": [v.model_dump() for v in sd_res.voiceprints],
+                                "metadata": sd_res.metadata,
                             },
                             "correlation_id": correlation_id,
                         }

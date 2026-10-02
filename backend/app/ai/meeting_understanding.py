@@ -29,7 +29,7 @@ class ExtractedKnowledgeObject(CoreBaseModel):
     )
     title: str
     content: str
-    confidence: float = Field(..., ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(..., ge=0.0, le=1.0)
     source_module: str = Field(default="meeting_understanding")
     source_segments: List[str] = Field(default_factory=list)
     source_intervals: List[Dict[str, float]] = Field(default_factory=list)
@@ -46,7 +46,7 @@ class MeetingUnderstandingResult(CoreBaseModel):
     meeting_id: uuid.UUID
     knowledge_objects: List[KnowledgeObjectCreate] = Field(default_factory=list)
     extracted_items: List[ExtractedKnowledgeObject] = Field(default_factory=list)
-    overall_confidence: float = Field(default=0.90, ge=0.0, le=1.0)
+    overall_confidence: Optional[float] = Field(default=0.90, ge=0.0, le=1.0)
     item_counts: Dict[str, int] = Field(default_factory=dict)
     correlation_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -93,6 +93,35 @@ class MeetingUnderstandingEngine:
         """
         Analyzes meeting transcript and context data, producing Knowledge Objects across all 7 types.
         """
+        from app.core.config import get_settings
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            if use_fixture:
+                raise ValueError("Fixture meeting understanding is forbidden in REAL mode")
+            if not transcript_text.strip():
+                raise ValueError("REAL meeting understanding requires an actual transcript")
+            context = context_data or {}
+            provenance = ProvenanceMetadataSchema(producing_module="meeting_understanding",
+                model_name=get_settings().OPENMOSS_MODEL_ID,
+                source_segments=context.get("source_segments", []),
+                source_intervals=context.get("source_intervals", []),
+                processing_metadata={"execution_mode": "REAL", "representation": "verbatim_transcript",
+                    "semantic_extraction": "NOT_VERIFIED", "correlation_id": correlation_id})
+            # Preserve a grounded transcript artifact. No real semantic provider is
+            # configured for the canned candidate branch below; do not manufacture
+            # decisions, actions, topics, facts or semantic summaries.
+            item = ExtractedKnowledgeObject(meeting_id=meeting_id, object_type="transcript_insight",
+                title="Meeting transcript", content=transcript_text, confidence=None,
+                source_segments=context.get("source_segments", []),
+                source_intervals=context.get("source_intervals", []),
+                status=KnowledgeObjectStatus.DRAFT, provenance=provenance,
+                correlation_id=correlation_id, payload={"requires_verification": True,
+                    "representation": "verbatim_transcript", "semantic_extraction": "NOT_VERIFIED"})
+            knowledge = KnowledgeObjectCreate(meeting_id=meeting_id, object_type=item.object_type,
+                title=item.title, content=item.content, confidence=None, status=item.status,
+                provenance=provenance, payload=item.payload)
+            return MeetingUnderstandingResult(meeting_id=meeting_id, knowledge_objects=[knowledge],
+                extracted_items=[item], overall_confidence=None, item_counts={"transcript_insight": 1},
+                correlation_id=correlation_id)
         if not transcript_text:
             return MeetingUnderstandingResult(
                 meeting_id=meeting_id,

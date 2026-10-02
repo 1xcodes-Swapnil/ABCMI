@@ -60,7 +60,7 @@ def run_single_dataset(args: argparse.Namespace) -> int:
     """Run evaluation on a single dataset."""
     runner = BenchmarkRunner()
     try:
-        runner.run_benchmark(
+        result = runner.run_benchmark(
             dataset_name=args.dataset,
             samples_count=args.samples,
             language=args.language,
@@ -70,7 +70,7 @@ def run_single_dataset(args: argparse.Namespace) -> int:
             resume=args.resume,
             run_id=args.run_id,
         )
-        return 0
+        return 0 if result.get("status") == "SUCCESS" else 1
     except Exception as ex:
         print(f"\n{COLOR_RED}[BENCHMARK ERROR] {ex}{COLOR_RESET}\n", file=sys.stderr)
         return 1

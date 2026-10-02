@@ -266,6 +266,9 @@ class MeetingService:
         # Update status to processing_requested
         meeting.status = "processing_requested"
         await self.meeting_repo.update(meeting)
+        # Keep the genuine intake/audio records available after a worker failure,
+        # so the existing CLI --meeting-id path can resume this same meeting.
+        await self.db.commit()
 
         ace_req = ACERequest(
             request_id=req.request_id,
@@ -284,9 +287,13 @@ class MeetingService:
 
             exec_status = blackboard.execution_state.get("status", "COMPLETED").upper()
             final_status = "completed" if exec_status == "COMPLETED" else "failed"
+            from app.core.config import get_settings
+            if final_status == "completed" and get_settings().EXECUTION_MODE.upper() == "REAL":
+                await self._persist_real_transcript(meeting, blackboard, ace_req.correlation_id)
 
             meeting.status = final_status
             await self.meeting_repo.update(meeting)
+            await self.db.commit()
 
             return MeetingProcessingResponse(
                 request_id=req.request_id,
@@ -296,8 +303,11 @@ class MeetingService:
                 message=f"ACE processing completed with status '{final_status}'.",
             )
         except Exception as ex:
+            await self.db.rollback()
+            await self.db.refresh(meeting)
             meeting.status = "failed"
             await self.meeting_repo.update(meeting)
+            await self.db.commit()
             logger.error(f"ACE processing failed for meeting {meeting_id}: {ex}")
             return MeetingProcessingResponse(
                 request_id=req.request_id,
@@ -306,6 +316,78 @@ class MeetingService:
                 status="failed",
                 message=f"Meeting processing failed: {str(ex)}",
             )
+
+    async def _persist_real_transcript(self, meeting, blackboard, correlation_id):
+        """Persist actual completed provider output and verify it in a fresh session."""
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+        from app.ai.multilingual_asr import ASRSegment
+        from app.ai.long_audio_processor import LongAudioProcessor
+        from app.ai.speaker_diarization import SpeakerDiarizationEngine
+        from app.models.transcript import Transcript, TranscriptSegment
+        from app.repositories.transcript_repo import TranscriptRepository, TranscriptSegmentRepository
+        outputs = {task.required_capability: task.metadata for task in blackboard.list_tasks()
+                   if getattr(task.status, "value", task.status) == "COMPLETED"}
+        asr = outputs.get("multilingual_asr", {})
+        if asr.get("metadata", {}).get("is_fixture") is not False:
+            raise RuntimeError("REAL persistence requires actual non-fixture ASR provenance")
+        segments = [ASRSegment.model_validate(s) for s in asr.get("segments", [])]
+        duration = outputs.get("audio_intelligence", {}).get("duration_seconds", 0)
+        if not segments or duration <= 0:
+            raise RuntimeError("REAL persistence requires non-empty observed transcript and audio duration")
+        comparison = SpeakerDiarizationEngine().verify_moss_with_pyannote(segments,
+            outputs.get("speaker_representation", {}).get("speaker_turns", []))
+        comparison["agreement_ratio"] = comparison.pop("accuracy", None)
+        processor = LongAudioProcessor()
+        chunk_count = asr.get("metadata", {}).get("chunk_count", 1)
+        mapping, removed = {}, 0
+        if chunk_count > 1:
+            mapping = asr.get("metadata", {}).get("speaker_mapping", {})
+            removed = asr.get("metadata", {}).get("deduplicated_segments_count", 0)
+        if chunk_count == 1:
+            chunks = processor.plan_chunks(duration)
+            if len(chunks) != 1:
+                raise RuntimeError("Single-pass ASR output disagrees with chunk planning")
+            global_segments = processor.offset_segments_to_global_time(segments, chunks[0].start_time)
+            reconciled, mapping = processor.reconcile_speakers_across_chunks([(chunks[0], global_segments)])
+            segments, removed = processor.merge_and_deduplicate_chunks(chunks, reconciled)
+        if not segments or any(not (0 <= s.start_time < s.end_time <= duration) for s in segments):
+            raise RuntimeError("REAL final transcript contains invalid or empty segments")
+        segments.sort(key=lambda s: (s.start_time, s.end_time))
+        expected = [(round(s.start_time*1000), round(s.end_time*1000), s.transcript, s.speaker_id) for s in segments]
+        repository = TranscriptSegmentRepository(self.db)
+        existing = await repository.list_by_meeting(meeting.id)
+        if existing:
+            signature = [(s.start_time_ms, s.end_time_ms, s.original_text, s.speaker_label) for s in existing]
+            if signature != expected:
+                raise RuntimeError("Existing transcript differs; replacement requires an explicit data action")
+        else:
+            await repository.bulk_create_segments([TranscriptSegment(id=s.segment_id, meeting_id=meeting.id,
+                start_time_ms=round(s.start_time*1000), end_time_ms=round(s.end_time*1000),
+                original_text=s.transcript, speaker_label=s.speaker_id, sequence_number=index+1,
+                language=s.detected_language or "und", confidence=s.confidence, words_payload=[], is_final=True)
+                for index, s in enumerate(segments)])
+        full_text = " ".join(s.transcript for s in segments)
+        transcripts = TranscriptRepository(self.db)
+        canonical = await transcripts.get_latest_version(meeting.id)
+        if canonical is None:
+            canonical = await transcripts.create(Transcript(meeting_id=meeting.id, full_text=full_text,
+                language="und", confidence_score=None, word_count=len(full_text.split()), is_final=True,
+                provenance={"execution_mode": "REAL", "correlation_id": correlation_id,
+                    "model": asr.get("metadata", {}), "speaker_comparison": comparison,
+                    "speaker_mapping": mapping, "deduplicated_segments": removed}))
+        meeting.settings = {**(meeting.settings or {}), "audio_duration_seconds": duration}
+        await self.db.commit()
+        # A separate identity map/transaction proves committed storage, not the
+        # in-memory entities that were just added to this session.
+        async with async_sessionmaker(self.db.bind, expire_on_commit=False)() as reader:
+            read_segments = await TranscriptSegmentRepository(reader).list_by_meeting(meeting.id)
+            read_transcript = await TranscriptRepository(reader).get_latest_version(meeting.id)
+            signature = [(s.start_time_ms, s.end_time_ms, s.original_text, s.speaker_label) for s in read_segments]
+            if signature != expected or not read_transcript or read_transcript.full_text != full_text:
+                raise RuntimeError("REAL committed transcript read-back differs from the final result")
+        blackboard.execution_state["transcript_persistence"] = {"segments_written": len(expected),
+            "commit": "passed", "read_back": "passed", "canonical_transcript_id": str(canonical.id),
+            "chunk_count": chunk_count, "deduplicated_segments": removed, "speaker_comparison": comparison}
 
     async def schedule_meeting(
         self,

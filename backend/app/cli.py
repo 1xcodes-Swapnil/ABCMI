@@ -63,7 +63,7 @@ def sanitize_error_text(text: str) -> str:
     import re
     sensitive_patterns = [
         (r'(?i)(password|secret|jwt_secret_key|api_key|token)=["\']?[^\s"\'&]+', r'\1=[REDACTED]'),
-        (r'(?i)(postgres://|postgresql\+asyncpg://|redis://)[^\s]+', r'\1[REDACTED]@host/db'),
+        (r'(?i)(postgres(?:ql)?(?:\+\w+)?://|rediss?://)[^\s]+', r'\1[REDACTED]@host/db'),
         (r'Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*', 'Bearer [REDACTED]'),
     ]
     sanitized = str(text)
@@ -147,7 +147,9 @@ def print_summary_card(summary_data: Dict[str, Any]):
     print("-" * 80)
     print(f"{COLOR_BOLD}Transcript Segments:{COLOR_RESET}  {summary_data.get('transcript_count', 0)}")
     print(f"{COLOR_BOLD}Speakers Identified:{COLOR_RESET}  {summary_data.get('speaker_count', 0)} ({', '.join(summary_data.get('speakers', [])) or 'None'})")
-    print(f"{COLOR_BOLD}Confidence Score:{COLOR_RESET}     {summary_data.get('confidence', 0.0):.2f}")
+    confidence = summary_data.get("confidence")
+    confidence_text = f"{confidence:.2f}" if confidence is not None else "NOT_VERIFIED"
+    print(f"{COLOR_BOLD}Confidence Score:{COLOR_RESET}     {confidence_text}")
     print(f"{COLOR_BOLD}Verification Required:{COLOR_RESET}{summary_data.get('verification_required', False)}")
     print("-" * 80)
 
@@ -295,18 +297,27 @@ async def execute_cli_pipeline(
         ace_orchestrator=ace_orchestrator,
     )
     print(f"    Processing status: {proc_resp.status} — {proc_resp.message}")
+    if proc_resp.status != "completed":
+        raise RuntimeError(f"Meeting processing did not complete: {proc_resp.status}")
 
     # Step 5: Fetch Intelligence & Transcripts
     step_num += 1
     print_step(step_num, total_steps, "Extracting meeting intelligence and canonical Knowledge Objects...")
     intel_service = MeetingIntelligenceService(db)
-    summary_resp = await intel_service.get_meeting_summary(meeting.id, auth_context)
+    try:
+        summary_resp = await intel_service.get_meeting_summary(meeting.id, auth_context)
+    except NotFoundException as exc:
+        if getattr(exc, "code", None) != "SUMMARY_NOT_AVAILABLE":
+            raise
+        summary_resp = None
     decisions_resp, _ = await intel_service.list_decisions(meeting.id, auth_context=auth_context)
     action_items_resp, _ = await intel_service.list_action_items(meeting.id, auth_context=auth_context)
     topics_resp, _ = await intel_service.list_topics(meeting.id, auth_context=auth_context)
 
     segment_repo = TranscriptSegmentRepository(db)
     segments = await segment_repo.list_by_meeting(meeting.id)
+    if get_settings().EXECUTION_MODE.upper() == "REAL" and not segments:
+        raise RuntimeError("REAL processing completed without persisted transcript segments.")
     speakers = sorted(list(set(s.speaker_label for s in segments if s.speaker_label)))
 
     # Step 6: Generate Meeting Report
@@ -344,21 +355,29 @@ async def execute_cli_pipeline(
         "title": meeting.title,
         "language": meeting.language,
         "status": proc_resp.status,
-        "duration": float(getattr(meeting, "duration_seconds", 0) or 0.0),
+        "duration": float((meeting.settings or {}).get("audio_duration_seconds") or 0.0),
         "transcript_count": len(segments),
         "speaker_count": len(speakers),
         "speakers": speakers,
-        "confidence": 0.92 if len(segments) > 0 else 0.80,
-        "verification_required": False,
+        "confidence": (sum(s.confidence for s in segments if s.confidence is not None) /
+                       sum(s.confidence is not None for s in segments))
+                      if any(s.confidence is not None for s in segments) else None,
+        "verification_required": any(s.confidence is None for s in segments),
         "summary_text": summary_resp.content if summary_resp else "No summary available.",
         "decisions": [d.model_dump() for d in decisions_resp] if decisions_resp else [],
         "action_items": [a.model_dump() for a in action_items_resp] if action_items_resp else [],
         "topics": [t.model_dump() for t in topics_resp] if topics_resp else [],
         "report_id": str(report.id),
         "translations": translations_list,
+        "transcript_segments": [{"id": str(s.id), "speaker": s.speaker_label,
+            "start_time_ms": s.start_time_ms, "end_time_ms": s.end_time_ms,
+            "text": s.original_text, "confidence": s.confidence, "language": s.language} for s in segments],
     }
 
     print_summary_card(summary_data)
+    for segment in summary_data["transcript_segments"]:
+        print(f"[{segment['start_time_ms']/1000:.3f}–{segment['end_time_ms']/1000:.3f}] "
+              f"{segment['speaker']}: {segment['text']}")
 
     # Optional Ask ABCI-MI Query Execution
     if query_str:
@@ -561,6 +580,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to local meeting audio/video file (.wav, .mp3, .m4a, .mp4, .webm, .aac, .flac, .ogg, .mkv)",
     )
+    parser.add_argument("--check-real-models", action="store_true", help="Inspect local model files/shards without claiming inference")
     parser.add_argument(
         "--meeting-id", "-m",
         type=str,
@@ -688,8 +708,8 @@ def run_real_mode_startup_check(verbose: bool = True) -> Dict[str, Any]:
     1. PyTorch is installed.
     2. CUDA status is detected.
     3. The configured MOSS model resolves.
-    4. MOSS weights/tokenizer/processor load.
-    5. Required pyannote models/dependencies load.
+    4. MOSS processor loads (weights and generation are separate checks).
+    5. Required pyannote dependency imports (not diarization inference).
     6. The configured device is usable.
     7. No mock provider or fixture transcript is selected.
     Any failure is explicit; does not report success or silently fall back.
@@ -753,27 +773,39 @@ def run_real_mode_startup_check(verbose: bool = True) -> Dict[str, Any]:
         if verbose:
             print(f"  [CHECK 3] Transformers library:         {COLOR_RED}FAILED (not installed){COLOR_RESET}")
 
-    # Check 4: MOSS weights/tokenizer/processor load
+    # Check 4: Processor only; do not claim model weights have been verified.
+    checks["moss_weights_load"] = None
     if checks.get("transformers_installed") and torch is not None:
         try:
             from transformers import AutoProcessor, AutoModelForCausalLM
             token = getattr(settings, "HF_TOKEN", None)
             cache_dir = getattr(settings, "OPENMOSS_CACHE_DIR", "/tmp/huggingface")
             # Probe model resolution
-            AutoProcessor.from_pretrained(model_id, trust_remote_code=True, cache_dir=cache_dir, token=token)
-            checks["moss_weights_load"] = True
+            from app.ai.multilingual_asr import OpenMOSSProvider
+            try:
+                processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True,
+                    cache_dir=cache_dir, token=token, local_files_only=True)
+            except TypeError as exc:
+                if "fix_mistral_regex" not in str(exc) or "multiple values" not in str(exc):
+                    raise
+                processor = OpenMOSSProvider({"model_id": model_id, "cache_dir": cache_dir,
+                                              "token": token})._construct_processor(remove_mistral_key=True)
+            if not getattr(processor, "chat_template", None):
+                OpenMOSSProvider({"model_id": model_id, "cache_dir": cache_dir,
+                                  "token": token})._construct_processor(remove_mistral_key=False)
+            checks["moss_processor_load"] = True
             if verbose:
-                print(f"  [CHECK 4] MOSS processor/weights:       {COLOR_GREEN}LOADED{COLOR_RESET}")
+                print(f"  [CHECK 4] MOSS processor:              {COLOR_GREEN}LOADED (weights not checked){COLOR_RESET}")
         except Exception as ex:
-            checks["moss_weights_load"] = False
-            failures.append(f"Failed to load MOSS weights/processor '{model_id}': {ex}")
+            checks["moss_processor_load"] = False
+            failures.append(f"Failed to load MOSS processor '{model_id}': {ex}")
             if verbose:
-                print(f"  [CHECK 4] MOSS processor/weights:       {COLOR_RED}FAILED ({ex}){COLOR_RESET}")
+                print(f"  [CHECK 4] MOSS processor:              {COLOR_RED}FAILED ({ex}){COLOR_RESET}")
     else:
-        checks["moss_weights_load"] = False
-        failures.append("MOSS weights loading blocked by missing PyTorch or Transformers")
+        checks["moss_processor_load"] = False
+        failures.append("MOSS processor loading blocked by missing PyTorch or Transformers")
         if verbose:
-            print(f"  [CHECK 4] MOSS processor/weights:       {COLOR_RED}BLOCKED (prerequisites missing){COLOR_RESET}")
+            print(f"  [CHECK 4] MOSS processor:              {COLOR_RED}BLOCKED (prerequisites missing){COLOR_RESET}")
 
     # Check 5: Required pyannote models/dependencies load
     try:
@@ -860,6 +892,8 @@ async def get_cli_db_session():
             yield session
             return
     except Exception as ex:
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            raise RuntimeError("REAL CLI requires the configured PostgreSQL connection; SQLite fallback is forbidden") from ex
         # PostgreSQL unavailable -> smooth fallback to local SQLite for CLI session
         db_path = os.path.abspath("./abcimi_cli_local.db")
         sqlite_url = f"sqlite+aiosqlite:///{db_path}"
@@ -885,6 +919,13 @@ async def async_cli_entrypoint():
     """Async main entrypoint for CLI execution."""
     # Check for custom meeting subcommands: meeting process-real or meeting check-real-mode
     raw_args = sys.argv[1:]
+    if "--check-real-models" in raw_args:
+        from app.ai.model_inventory import inventory
+        import json
+        models = inventory()
+        print(json.dumps({"models": models, "execution_mode": get_settings().EXECUTION_MODE,
+                          "device": get_settings().OPENMOSS_DEVICE}, indent=2))
+        sys.exit(0 if all(m["status"] == "COMPLETE" for m in models if m["required"]) else 1)
     is_meeting_subcommand = len(raw_args) >= 1 and raw_args[0] == "meeting"
     meeting_action = raw_args[1] if is_meeting_subcommand and len(raw_args) >= 2 else None
 
@@ -1002,10 +1043,19 @@ async def async_cli_entrypoint():
 def main():
     """Synchronous wrapper entrypoint."""
     try:
+        if len(sys.argv) > 1 and sys.argv[1] == "real-smoke":
+            # The validation workflow owns its event loop, like this CLI wrapper.
+            import os
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            from app.ai.real_validation import main as smoke_main
+            sys.exit(smoke_main(sys.argv[2:]))
         asyncio.run(async_cli_entrypoint())
     except KeyboardInterrupt:
         print("\n[INFO] Operation cancelled by user.")
-        sys.exit(0)
+        sys.exit(130)
+    except Exception as exc:
+        print(f"[ERROR] {sanitize_error_text(str(exc))}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

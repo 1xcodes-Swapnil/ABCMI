@@ -34,7 +34,7 @@ class OverlapResolutionResult(CoreBaseModel):
     meeting_id: uuid.UUID
     overlapping_segments: List[OverlappingSegment] = Field(default_factory=list)
     resolved_candidates: List[OverlapCandidateHypothesis] = Field(default_factory=list)
-    adjusted_confidence: float = Field(default=0.88, ge=0.0, le=1.0)
+    adjusted_confidence: Optional[float] = Field(default=0.88, ge=0.0, le=1.0)
 
 
 class OverlapResolutionEngine:
@@ -61,6 +61,30 @@ class OverlapResolutionEngine:
         Detects concurrent speech regions and generates separated candidate hypotheses.
         """
         m_id = meeting_id or getattr(diarization_result, "meeting_id", None) or getattr(asr_result, "meeting_id", None) or uuid.uuid4()
+        from app.core.config import get_settings
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            turns = diarization_turns if diarization_turns is not None else getattr(diarization_result, "speaker_turns", None)
+            if not turns:
+                raise ValueError("REAL overlap detection requires actual diarization turns")
+            def value(turn, key):
+                return turn[key] if isinstance(turn, dict) else getattr(turn, key)
+            overlaps = []
+            for i, first in enumerate(turns):
+                for second in turns[i + 1:]:
+                    if value(first, "speaker_id") == value(second, "speaker_id"):
+                        continue
+                    start = max(value(first, "start_time"), value(second, "start_time"))
+                    end = min(value(first, "end_time"), value(second, "end_time"))
+                    if end > start:
+                        duration = min(value(first, "end_time") - value(first, "start_time"),
+                                       value(second, "end_time") - value(second, "start_time"))
+                        overlaps.append(OverlappingSegment(start_time=start, end_time=end,
+                            primary_speaker=value(first, "speaker_id"), secondary_speaker=value(second, "speaker_id"),
+                            overlap_ratio=(end - start) / duration))
+            if overlaps:
+                raise RuntimeError("REAL overlapping speech detected; no separation provider is configured")
+            return OverlapResolutionResult(meeting_id=m_id, overlapping_segments=[],
+                                           resolved_candidates=[], adjusted_confidence=None)
 
         overlaps = [
             OverlappingSegment(

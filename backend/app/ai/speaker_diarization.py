@@ -21,7 +21,7 @@ class SpeakerVoiceprint(CoreBaseModel):
     """Voiceprint embedding vector representation for a speaker."""
     speaker_id: str = Field(..., description="Unique speaker identifier")
     embedding_vector: List[float] = Field(default_factory=list, description="Dimensional voiceprint vector")
-    confidence: float = Field(default=0.95, ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(default=0.95, ge=0.0, le=1.0)
 
 
 class SpeakerTurn(CoreBaseModel):
@@ -30,7 +30,7 @@ class SpeakerTurn(CoreBaseModel):
     speaker_id: str = Field(..., description="Assigned speaker ID")
     start_time: float = Field(..., ge=0.0)
     end_time: float = Field(..., ge=0.0)
-    confidence: float = Field(default=0.92, ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(default=0.92, ge=0.0, le=1.0)
 
 
 class DiarizationResult(CoreBaseModel):
@@ -39,13 +39,17 @@ class DiarizationResult(CoreBaseModel):
     num_speakers: int = Field(default=1, ge=1)
     speaker_turns: List[SpeakerTurn] = Field(default_factory=list)
     voiceprints: List[SpeakerVoiceprint] = Field(default_factory=list)
-    overall_confidence: float = Field(default=0.91, ge=0.0, le=1.0)
+    overall_confidence: Optional[float] = Field(default=0.91, ge=0.0, le=1.0)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SpeakerDiarizationEngine:
     """
     Speaker Diarization Engine utilizing voiceprint embeddings and spectral clustering/PyAnnote (REAL mode).
     """
+
+    _cached_pipeline = None
+    _cached_pipeline_key = None
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         self.config = config or {
@@ -99,15 +103,22 @@ class SpeakerDiarizationEngine:
                     )
 
                 try:
-                    pipeline = Pipeline.from_pretrained(
-                        "pyannote/speaker-diarization-3.1",
-                        token=settings.HF_TOKEN
-                    )
+                    from app.ai.model_inventory import configure_cache
+                    cache = configure_cache()
+                    device = torch.device(settings.OPENMOSS_DEVICE if settings.OPENMOSS_DEVICE != "auto" else "cuda:0")
+                    if device.type == "cuda" and not torch.cuda.is_available():
+                        raise RuntimeError("Configured CUDA device unavailable for REAL PyAnnote")
+                    key = (str(cache), str(device))
+                    pipeline = self._cached_pipeline if key == self._cached_pipeline_key else None
+                    if pipeline is None:
+                        pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1",
+                            token=settings.HF_TOKEN, cache_dir=cache)
                     if pipeline is None:
                         logger.warning("PYANNOTE BLOCKED: PyAnnote pipeline returned None from Hugging Face.")
                         raise ValueError("PYANNOTE BLOCKED: Pipeline returned None from Hugging Face.")
-                    device = torch.device("cuda" if (settings.OPENMOSS_DEVICE == "cuda" and torch.cuda.is_available()) else "cpu")
                     pipeline.to(device)
+                    SpeakerDiarizationEngine._cached_pipeline = pipeline
+                    SpeakerDiarizationEngine._cached_pipeline_key = key
                 except Exception as ex:
                     logger.warning("PYANNOTE BLOCKED: Failed to load PyAnnote diarization model: %s", ex)
                     raise RuntimeError(f"PYANNOTE BLOCKED: Failed to load PyAnnote diarization model: {ex}") from ex
@@ -118,38 +129,55 @@ class SpeakerDiarizationEngine:
                     waveform, sample_rate = sf.read(tmp_path, dtype="float32", always_2d=True)
                     waveform = torch.from_numpy(waveform.T)
                     diarization_input = {"waveform": waveform, "sample_rate": sample_rate}
+                    import time
+                    started = time.perf_counter()
                     diarization = pipeline(diarization_input, num_speakers=expected_speakers)
+                    inference_seconds = time.perf_counter() - started
+                    annotation = getattr(diarization, "speaker_diarization", diarization)
+                    embeddings = getattr(diarization, "speaker_embeddings", None)
                     
                     turns = []
                     voiceprints = []
                     speakers_set = set()
                     
-                    for turn, _, speaker in diarization.itertracks(yield_label=True):
+                    for turn, _, speaker in annotation.itertracks(yield_label=True):
                         turns.append(
                             SpeakerTurn(
                                 speaker_id=str(speaker),
                                 start_time=float(turn.start),
                                 end_time=float(turn.end),
-                                confidence=0.95
+                                confidence=None
                             )
                         )
                         speakers_set.add(speaker)
                         
-                    for spk in speakers_set:
-                        voiceprints.append(
-                            SpeakerVoiceprint(
-                                speaker_id=str(spk),
-                                embedding_vector=[0.0] * self.config.get("embedding_dim", 128),
-                                confidence=0.95
+                    if not turns:
+                        raise ValueError("REAL PyAnnote returned no speaker turns")
+                    if embeddings is not None:
+                        import numpy as np
+                        labels = annotation.labels()
+                        if len(embeddings) != len(labels) or not np.isfinite(embeddings).all():
+                            raise ValueError("PyAnnote returned invalid speaker embeddings")
+                        for spk, embedding in zip(labels, embeddings):
+                            voiceprints.append(
+                                SpeakerVoiceprint(
+                                    speaker_id=str(spk),
+                                    embedding_vector=embedding.tolist(),
+                                    confidence=None
+                                )
                             )
-                        )
                         
                     return DiarizationResult(
                         meeting_id=meeting_id,
                         num_speakers=max(len(speakers_set), 1),
                         speaker_turns=turns,
                         voiceprints=voiceprints,
-                        overall_confidence=0.95,
+                        overall_confidence=None,
+                        metadata={"model": "pyannote/speaker-diarization-3.1", "device": str(device),
+                                  "raw_output_type": type(diarization).__name__, "inference_seconds": inference_seconds,
+                                  "embedding_shape": list(embeddings.shape) if embeddings is not None else None,
+                                  "embedding_dtype": str(embeddings.dtype) if embeddings is not None else None,
+                                  "confidence_status": "NOT_VERIFIED"},
                     )
                 except Exception as ex:
                     raise RuntimeError(f"PyAnnote diarization inference failed: {ex}") from ex
@@ -186,6 +214,8 @@ class SpeakerDiarizationEngine:
         correlation_id: Optional[str] = None,
     ) -> DiarizationResult:
         """Convenience wrapper for audio processing."""
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            raise RuntimeError("REAL mode requires awaiting diarize_audio; static process_audio output is forbidden")
         turns = [
             SpeakerTurn(speaker_id="speaker_0", start_time=0.0, end_time=3.6, confidence=0.94),
             SpeakerTurn(speaker_id="speaker_1", start_time=3.6, end_time=7.2, confidence=0.91),
@@ -212,6 +242,8 @@ class SpeakerDiarizationEngine:
         """
         if not audio_chunk:
             raise ValueError("Audio chunk cannot be empty.")
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            raise RuntimeError("Standalone REAL voiceprint extraction is not implemented; use actual diarization embeddings")
 
         return SpeakerVoiceprint(
             speaker_id=speaker_id,

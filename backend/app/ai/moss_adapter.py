@@ -33,7 +33,10 @@ def get_moss_adapter(config: Optional[Dict[str, Any]] = None) -> OpenMOSSProvide
     settings = get_settings()
     cfg = config or {}
     if "device" not in cfg:
-        cfg["device"] = "cuda" if getattr(settings, "CUDA_AVAILABLE", False) else "cpu"
+        cfg["device"] = settings.OPENMOSS_DEVICE
+    cfg.setdefault("model_id", settings.OPENMOSS_MODEL_ID)
+    cfg.setdefault("cache_dir", settings.OPENMOSS_CACHE_DIR)
+    cfg.setdefault("token", settings.HF_TOKEN)
     return OpenMOSSProvider(config=cfg)
 
 

@@ -24,10 +24,10 @@ class CleanedTranscriptSegment(CoreBaseModel):
     end_time: float = Field(..., ge=0.0)
     raw_transcript: str = Field(..., description="Unmodified original text")
     cleaned_transcript: str = Field(..., description="Normalized text with artifacts removed")
-    detected_language: str = Field(default="en")
+    detected_language: Optional[str] = Field(default="en")
     code_switch_boundaries: List[CodeSwitchBoundary] = Field(default_factory=list)
     words: List[ASRWordTimestamp] = Field(default_factory=list)
-    confidence: float = Field(default=0.90, ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(default=0.90, ge=0.0, le=1.0)
     removed_artifacts: List[str] = Field(default_factory=list, description="Removed filler or stutter tokens")
 
 
@@ -38,9 +38,9 @@ class ConversationalTurn(CoreBaseModel):
     start_time: float = Field(..., ge=0.0)
     end_time: float = Field(..., ge=0.0)
     text: str = Field(...)
-    detected_language: str = Field(default="en")
+    detected_language: Optional[str] = Field(default="en")
     segment_ids: List[uuid.UUID] = Field(default_factory=list)
-    turn_confidence: float = Field(default=0.90, ge=0.0, le=1.0)
+    turn_confidence: Optional[float] = Field(default=0.90, ge=0.0, le=1.0)
 
 
 class TranscriptUnit(CoreBaseModel):
@@ -51,8 +51,8 @@ class TranscriptUnit(CoreBaseModel):
     start_time: float = Field(..., ge=0.0)
     end_time: float = Field(..., ge=0.0)
     sentence: str = Field(...)
-    detected_language: str = Field(default="en")
-    confidence: float = Field(default=0.90, ge=0.0, le=1.0)
+    detected_language: Optional[str] = Field(default="en")
+    confidence: Optional[float] = Field(default=0.90, ge=0.0, le=1.0)
 
 
 class TranscriptIntelligenceResult(CoreBaseModel):
@@ -62,7 +62,7 @@ class TranscriptIntelligenceResult(CoreBaseModel):
     cleaned_segments: List[CleanedTranscriptSegment] = Field(default_factory=list)
     conversational_turns: List[ConversationalTurn] = Field(default_factory=list)
     transcript_units: List[TranscriptUnit] = Field(default_factory=list)
-    overall_confidence: float = Field(default=0.90, ge=0.0, le=1.0)
+    overall_confidence: Optional[float] = Field(default=0.90, ge=0.0, le=1.0)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
@@ -162,7 +162,8 @@ class TranscriptIntelligenceEngine:
                 removed_artifacts=artifacts,
             )
             cleaned_segments.append(cleaned_seg)
-            confidences.append(seg.confidence)
+            if seg.confidence is not None:
+                confidences.append(seg.confidence)
 
         # Fuse compatible adjacent segments belonging to same speaker within merge threshold
         turns = self._build_conversational_turns(cleaned_segments)
@@ -171,7 +172,7 @@ class TranscriptIntelligenceEngine:
         units = self._extract_transcript_units(turns)
 
         full_cleaned = " ".join([t.text for t in turns])
-        overall_conf = (sum(confidences) / len(confidences)) if confidences else 0.90
+        overall_conf = (sum(confidences) / len(confidences)) if confidences else None
 
         return TranscriptIntelligenceResult(
             meeting_id=asr_result.meeting_id,
@@ -216,7 +217,8 @@ class TranscriptIntelligenceEngine:
                 curr_seg_ids.extend(seg.source_segment_ids)
                 curr_confs.append(seg.confidence)
             else:
-                avg_conf = sum(curr_confs) / len(curr_confs)
+                measured = [value for value in curr_confs if value is not None]
+                avg_conf = sum(measured) / len(measured) if measured else None
                 turns.append(
                     ConversationalTurn(
                         speaker_id=curr_spk,
@@ -245,7 +247,9 @@ class TranscriptIntelligenceEngine:
                     text=" ".join(curr_texts),
                     detected_language=curr_lang,
                     segment_ids=curr_seg_ids,
-                    turn_confidence=sum(curr_confs) / len(curr_confs),
+                    turn_confidence=(sum(c for c in curr_confs if c is not None) /
+                                     sum(c is not None for c in curr_confs))
+                                    if any(c is not None for c in curr_confs) else None,
                 )
             )
 
@@ -256,7 +260,15 @@ class TranscriptIntelligenceEngine:
         turns: List[ConversationalTurn],
     ) -> List[TranscriptUnit]:
         units: List[TranscriptUnit] = []
+        from app.core.config import get_settings
         for turn in turns:
+            if get_settings().EXECUTION_MODE.upper() == "REAL":
+                # No word/sentence alignment model supplied timings. Keep the
+                # complete observed turn interval rather than subdividing time.
+                units.append(TranscriptUnit(turn_id=turn.turn_id, speaker_id=turn.speaker_id,
+                    start_time=turn.start_time, end_time=turn.end_time, sentence=turn.text,
+                    detected_language=turn.detected_language, confidence=turn.turn_confidence))
+                continue
             sentences = [s.strip() for s in turn.text.split(".") if s.strip()]
             if not sentences:
                 sentences = [turn.text]

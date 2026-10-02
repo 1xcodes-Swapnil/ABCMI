@@ -32,17 +32,17 @@ class SpeakerParticipationStats(CoreBaseModel):
 class CodeSwitchStats(CoreBaseModel):
     """Statistics on code-switching transitions during meeting."""
 
-    total_switch_points: int = Field(default=0)
-    switches_per_minute: float = Field(default=0.0)
+    total_switch_points: Optional[int] = Field(default=0)
+    switches_per_minute: Optional[float] = Field(default=0.0)
     top_language_pairs: Dict[str, int] = Field(default_factory=dict)
 
 
 class ConfidenceStats(CoreBaseModel):
     """Statistical breakdown of confidence scores across AI processing stages."""
 
-    mean_confidence: float = Field(default=0.0)
-    min_confidence: float = Field(default=0.0)
-    max_confidence: float = Field(default=0.0)
+    mean_confidence: Optional[float] = Field(default=0.0)
+    min_confidence: Optional[float] = Field(default=0.0)
+    max_confidence: Optional[float] = Field(default=0.0)
     sample_count: int = Field(default=0)
 
 
@@ -93,11 +93,13 @@ class MeetingAnalyticsEngine:
         """
         Computes meeting analytics metrics from provided pipeline artifacts.
         """
+        from app.core.config import get_settings
+        real = get_settings().EXECUTION_MODE.upper() == "REAL"
         turns = speaker_turns or []
-        langs = language_tokens or {"en": 80, "hi": 20}
+        langs = language_tokens or ({} if real else {"en": 80, "hi": 20})
         boundaries = code_switch_boundaries or []
         topics = topic_segments or []
-        confs = confidence_scores or [0.92, 0.95, 0.88, 0.94]
+        confs = confidence_scores or ([] if real else [0.92, 0.95, 0.88, 0.94])
         kos = knowledge_objects or []
 
         # 1. Speaker Participation & Speaking Duration
@@ -115,6 +117,10 @@ class MeetingAnalyticsEngine:
             total_speak_time += dur
 
         total_duration = max(meeting_duration_seconds, total_speak_time, 1.0)
+        if real:
+            if not turns or meeting_duration_seconds <= 0:
+                raise ValueError("REAL analytics requires observed speaker turns and measured audio duration")
+            total_duration = meeting_duration_seconds
 
         participation_list: List[SpeakerParticipationStats] = []
         for spk, stats in speaker_map.items():
@@ -130,7 +136,7 @@ class MeetingAnalyticsEngine:
                 )
             )
 
-        if not participation_list:
+        if not participation_list and not real:
             # Fallback default speaker stats
             participation_list = [
                 SpeakerParticipationStats(
@@ -168,8 +174,10 @@ class MeetingAnalyticsEngine:
         cs_stats = CodeSwitchStats(
             total_switch_points=total_cs,
             switches_per_minute=cs_rate,
-            top_language_pairs=pair_counts or {"en->hi": total_cs},
+            top_language_pairs=pair_counts or ({} if real else {"en->hi": total_cs}),
         )
+        if real and code_switch_boundaries is None:
+            cs_stats = CodeSwitchStats(total_switch_points=None, switches_per_minute=None)
 
         # 4. Topic Distribution
         topic_dist: Dict[str, float] = {}
@@ -179,7 +187,7 @@ class MeetingAnalyticsEngine:
                 name = t.get("topic", "General Discussion")
                 w = float(t.get("duration", 1.0))
                 topic_dist[name] = round((w / total_topic_weight * 100.0), 2)
-        else:
+        elif not real:
             topic_dist = {"Architecture & Integration": 60.0, "Testing & Quality": 40.0}
 
         # 5. Confidence Statistics
@@ -193,6 +201,8 @@ class MeetingAnalyticsEngine:
                 max_confidence=round(c_max, 4),
                 sample_count=len(confs),
             )
+        elif real:
+            c_stats = ConfidenceStats(mean_confidence=None, min_confidence=None, max_confidence=None, sample_count=0)
         else:
             c_stats = ConfidenceStats(
                 mean_confidence=0.92,
@@ -218,7 +228,7 @@ class MeetingAnalyticsEngine:
             elif st in ("rejected",):
                 rej_cnt += 1
 
-        if not kos:
+        if not kos and not real:
             ko_counts_by_type = {
                 "decision": 1,
                 "action_item": 1,
@@ -247,7 +257,11 @@ class MeetingAnalyticsEngine:
             source_segments=[],
             source_intervals=[],
             lineage={"meeting_id": str(meeting_id)},
-            processing_metadata={"correlation_id": correlation_id},
+            processing_metadata={"correlation_id": correlation_id,
+                "confidence_verification": "NOT_VERIFIED" if not confs else "measured_signals",
+                "language_verification": "NOT_VERIFIED" if not langs else "observed_tokens",
+                "topic_verification": "NOT_VERIFIED" if not topics else "observed_topics",
+                "code_switch_verification": "NOT_VERIFIED" if code_switch_boundaries is None else "observed_boundaries"},
         )
 
         return MeetingAnalyticsResult(

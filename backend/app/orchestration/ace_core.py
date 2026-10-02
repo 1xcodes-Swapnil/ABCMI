@@ -266,8 +266,12 @@ class TaskPlanner:
 
         # Extraction/parsing tier
         add_task("multilingual_asr", ["audio_intelligence"], priority=8)
-        add_task("overlap_resolution", ["audio_intelligence"], priority=7)
         add_task("speaker_representation", ["audio_intelligence"], priority=7)
+        from app.core.config import get_settings
+        overlap_dependencies = (["multilingual_asr", "speaker_representation"]
+                                if get_settings().EXECUTION_MODE.upper() == "REAL"
+                                else ["audio_intelligence"])
+        add_task("overlap_resolution", overlap_dependencies, priority=7)
 
         # Synthesis/alignment tier
         add_task("code_switch_intelligence", ["multilingual_asr", "speaker_representation"], priority=6)

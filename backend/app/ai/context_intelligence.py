@@ -36,12 +36,12 @@ class ContextualDependency(CoreBaseModel):
 class ContextIntelligenceResult(CoreBaseModel):
     """Output model for Context Intelligence processing."""
     meeting_id: uuid.UUID
-    topic_context: str = Field(..., description="Primary topic or discussion theme")
+    topic_context: Optional[str] = Field(..., description="Primary topic, if actually inferred")
     conversation_summary: str = Field(..., description="High-level synthesis of discussion flow")
     speaker_relationships: List[SpeakerRelationship] = Field(default_factory=list)
     contextual_dependencies: List[ContextualDependency] = Field(default_factory=list)
-    overall_confidence: float = Field(default=0.88, ge=0.0, le=1.0)
-    is_low_confidence: bool = Field(default=False, description="True if confidence falls below threshold 0.70")
+    overall_confidence: Optional[float] = Field(default=0.88, ge=0.0, le=1.0)
+    is_low_confidence: Optional[bool] = Field(default=False, description="Unknown without measured confidence")
     requires_verification: bool = Field(default=False)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -75,6 +75,23 @@ class ContextIntelligenceEngine:
         Extracts multi-turn conversation context, topic continuity, and dependencies from transcript intelligence.
         """
         m_id = meeting_id or getattr(transcript_result, "meeting_id", None) or uuid.uuid4()
+        from app.core.config import get_settings
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            if not transcript_result or not transcript_result.cleaned_segments:
+                raise ValueError("REAL context requires observed transcript segments")
+            # The existing semantic branch has no real topic/summary provider.
+            # Preserve observed conversational context; do not promote canned
+            # topics, relationships or explanations to inferred meeting facts.
+            return ContextIntelligenceResult(meeting_id=m_id, topic_context=None,
+                conversation_summary=transcript_result.cleaned_full_transcript,
+                overall_confidence=None, is_low_confidence=None, requires_verification=True,
+                metadata={"correlation_id": correlation_id, "representation": "verbatim_transcript_context",
+                    "semantic_extraction": "NOT_VERIFIED", "model_name": None,
+                    "turns_count": len(transcript_result.conversational_turns),
+                    "speaker_sequence": [t.speaker_id for t in transcript_result.conversational_turns],
+                    "source_segments": [str(s.segment_id) for s in transcript_result.cleaned_segments],
+                    "source_intervals": [{"start_time": s.start_time, "end_time": s.end_time}
+                                         for s in transcript_result.cleaned_segments]})
 
         if not transcript_result or not transcript_result.conversational_turns:
             return ContextIntelligenceResult(
@@ -165,6 +182,10 @@ class ContextIntelligenceEngine:
         Preserves provenance, confidence, meeting scope, and lifecycle state without writing to DB directly.
         """
         if not context_result:
+            return []
+        from app.core.config import get_settings
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            # Verbatim context is not a model-inferred topic or semantic summary.
             return []
 
         ko_list: List[KnowledgeObjectCreate] = []

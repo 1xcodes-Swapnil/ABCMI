@@ -77,6 +77,7 @@ class CodeSwitchIntelligenceEngine:
         }
         self.model = None
         self.tokenizer = None
+        self.last_inference = {}
 
     def _load_sarvam_model(self) -> None:
         """Loads and quantizes Sarvam-1 Indic LM for real text normalization."""
@@ -87,11 +88,15 @@ class CodeSwitchIntelligenceEngine:
 
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
+        from app.ai.model_inventory import configure_cache
+        cache = configure_cache()
 
         model_id = self.config.get("model_id", "sarvamai/sarvam-1")
         settings = get_settings()
         hf_token = getattr(settings, "HF_TOKEN", None)
         is_cuda = torch.cuda.is_available()
+        if settings.EXECUTION_MODE.upper() == 'REAL' and settings.OPENMOSS_DEVICE.startswith('cuda') and not is_cuda:
+            raise RuntimeError('REAL Sarvam CUDA was requested but is unavailable; CPU fallback is forbidden')
 
         logger.info("Initializing Quantized Sarvam-1 Indic LM (%s)...", model_id)
         try:
@@ -99,6 +104,8 @@ class CodeSwitchIntelligenceEngine:
                 model_id,
                 trust_remote_code=True,
                 token=hf_token,
+                local_files_only=True,
+                cache_dir=cache,
             )
 
             if is_cuda:
@@ -113,8 +120,11 @@ class CodeSwitchIntelligenceEngine:
                     model_id,
                     trust_remote_code=True,
                     token=hf_token,
-                    device_map="auto",
+                    device_map={"": "cuda:0"},
                     quantization_config=bnb_config,
+                    local_files_only=True,
+                    cache_dir=cache,
+                    dtype=torch.float16,
                 )
                 logger.info("REAL MODEL LOADED: Sarvam-1 loaded with 4-bit CUDA quantization.")
             else:
@@ -126,6 +136,8 @@ class CodeSwitchIntelligenceEngine:
                     device_map="cpu",
                     torch_dtype=torch.float32,
                     low_cpu_mem_usage=True,
+                    local_files_only=True,
+                    cache_dir=cache,
                 )
                 try:
                     logger.info("Applying PyTorch dynamic INT8 quantization to Sarvam-1 for CPU...")
@@ -142,7 +154,7 @@ class CodeSwitchIntelligenceEngine:
             CodeSwitchIntelligenceEngine._cached_sarvam_model = self.model
             CodeSwitchIntelligenceEngine._cached_sarvam_tokenizer = self.tokenizer
         except Exception as ex:
-            logger.warning("Could not load real Sarvam-1 model (%s). Using heuristic pipeline fallback.", ex)
+            raise RuntimeError("REAL Sarvam-1 loading failed; cached model artifacts are required and heuristic fallback is forbidden") from ex
 
     async def detect_boundaries(
         self,
@@ -211,7 +223,7 @@ class CodeSwitchIntelligenceEngine:
     async def map_to_canonical(self, text: str) -> str:
         """
         Translates code-switched utterance to unified canonical English representation
-        using the real Sarvam-1 model (when loaded) or dictionary heuristic fallback.
+        using Sarvam-1 text completion in REAL mode; dictionary substitutions are fixture-only.
         """
         if not text:
             return ""
@@ -222,20 +234,38 @@ class CodeSwitchIntelligenceEngine:
             if self.model is not None and self.tokenizer is not None:
                 try:
                     import torch
-                    prompt = f"Translate and normalize this mixed speech to standard English: {text}\nEnglish translation:"
+                    # Sarvam-1 is a base text-completion model, not a chat model.
+                    # Bound the completion to one translation record so continuation
+                    # into unrelated questions cannot become canonical meeting text.
+                    prompt = f"Original speech: {text}\nEnglish translation:"
                     inputs = self.tokenizer(prompt, return_tensors="pt")
+                    inputs = inputs.to(next(self.model.parameters()).device)
+                    import time
+                    started = time.perf_counter()
                     with torch.no_grad():
                         outputs = self.model.generate(
                             **inputs,
-                            max_new_tokens=100,
+                            max_new_tokens=self.config.get("max_new_tokens", 100),
                             do_sample=False,
                             pad_token_id=self.tokenizer.eos_token_id,
+                            stop_strings=["\n"],
+                            tokenizer=self.tokenizer,
                         )
                     decoded = self.tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+                    self.last_raw_completion = decoded
+                    self.last_inference = {"generation_seconds": time.perf_counter() - started,
+                        "input_tokens": int(inputs["input_ids"].shape[1]),
+                        "generated_tokens": int(outputs.shape[1] - inputs["input_ids"].shape[1]),
+                        "device": str(next(self.model.parameters()).device), "raw_output_exists": bool(decoded),
+                        "task_mode": "bounded_text_completion", "normalization_accuracy": "NOT_VERIFIED"}
+                    if "\n" in decoded:
+                        raise ValueError("Sarvam returned multiple records despite the completion boundary")
                     if decoded:
                         return decoded
+                    raise ValueError("REAL Sarvam-1 generated empty output")
                 except Exception as infer_err:
-                    logger.warning("Sarvam-1 neural generation failed: %s; using heuristic mapping.", infer_err)
+                    raise RuntimeError("REAL Sarvam-1 generation failed; heuristic fallback is forbidden") from infer_err
+            raise RuntimeError("REAL Sarvam-1 model and tokenizer are unavailable")
 
         replacements = {
             "namaste": "Hello",

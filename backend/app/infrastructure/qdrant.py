@@ -23,6 +23,8 @@ def init_qdrant_client() -> AsyncQdrantClient:
 
     if _qdrant_client is None:
         if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("TESTING") == "true":
+            if settings.EXECUTION_MODE.upper() == "REAL":
+                raise RuntimeError("REAL Qdrant forbids in-memory test storage")
             logger.info("Initializing in-memory AsyncQdrantClient for testing")
             _qdrant_client = AsyncQdrantClient(location=":memory:")
         else:
@@ -39,6 +41,8 @@ def init_qdrant_client() -> AsyncQdrantClient:
                     check_compatibility=False,
                 )
             except Exception as e:
+                if settings.EXECUTION_MODE.upper() == "REAL":
+                    raise RuntimeError("REAL Qdrant connection construction failed; in-memory fallback is forbidden") from e
                 logger.warning(f"Failed to connect to Qdrant at {settings.qdrant_connection_url}, falling back to in-memory: {e}")
                 _qdrant_client = AsyncQdrantClient(location=":memory:")
 

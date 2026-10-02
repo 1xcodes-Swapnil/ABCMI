@@ -24,6 +24,7 @@ class SemanticIndexer:
     Semantic Indexer component implementing SemanticIndexer protocol and Qdrant integration.
     Ensures consistency where PostgreSQL is authoritative and Qdrant is the semantic search index.
     """
+    _real_models = {}
 
     def __init__(
         self,
@@ -55,7 +56,9 @@ class SemanticIndexer:
                     ),
                 )
         except Exception:
-            pass
+            from app.core.config import get_settings
+            if get_settings().EXECUTION_MODE.upper() == "REAL":
+                raise
 
     def generate_embedding(self, text: str) -> List[float]:
         """
@@ -63,6 +66,32 @@ class SemanticIndexer:
         Produces a normalized vector of dimension `vector_size` based on text features
         to support robust semantic search and offline testing.
         """
+        from app.core.config import get_settings
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            import torch
+            from transformers import AutoModel, AutoTokenizer
+            from app.ai.model_inventory import configure_cache
+            settings = get_settings()
+            key = (settings.SEMANTIC_EMBEDDING_MODEL_ID, settings.SEMANTIC_EMBEDDING_DEVICE)
+            if key not in self._real_models:
+                cache = configure_cache()
+                tokenizer = AutoTokenizer.from_pretrained(key[0], cache_dir=cache, local_files_only=True)
+                model = AutoModel.from_pretrained(key[0], cache_dir=cache, local_files_only=True,
+                                                 dtype=torch.float32).to(key[1]).eval()
+                self._real_models[key] = (tokenizer, model)
+            tokenizer, model = self._real_models[key]
+            if not text or not text.strip():
+                raise ValueError("REAL embeddings require non-empty actual text")
+            inputs = tokenizer(text, padding=True, truncation=True, max_length=256,
+                               return_tensors="pt").to(key[1])
+            with torch.inference_mode():
+                tokens = model(**inputs).last_hidden_state
+                mask = inputs["attention_mask"].unsqueeze(-1).expand(tokens.size()).float()
+                pooled = (tokens * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
+                vector = torch.nn.functional.normalize(pooled, p=2, dim=1)[0]
+            if vector.numel() != self.vector_size or not torch.isfinite(vector).all():
+                raise ValueError("REAL embedding dimension/values differ from the existing vector schema")
+            return vector.cpu().tolist()
         if not text:
             text = ""
         
@@ -112,6 +141,10 @@ class SemanticIndexer:
                 "metadata": obj.metadata if (hasattr(obj, "metadata") and isinstance(obj.metadata, dict)) else {},
                 "provenance": obj.provenance if (hasattr(obj, "provenance") and isinstance(obj.provenance, dict)) else {},
             }
+            from app.core.config import get_settings
+            if get_settings().EXECUTION_MODE.upper() == "REAL":
+                payload["embedding_model"] = get_settings().SEMANTIC_EMBEDDING_MODEL_ID
+                payload["embedding_device"] = get_settings().SEMANTIC_EMBEDDING_DEVICE
 
             await client.upsert(
                 collection_name=self.collection_name,

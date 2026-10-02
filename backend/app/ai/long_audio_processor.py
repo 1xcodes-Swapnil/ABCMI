@@ -63,6 +63,10 @@ class ChunkProcessingState(CoreBaseModel):
     total_chunks: int = Field(default=1, ge=1)
     chunks: List[ChunkMetadata] = Field(default_factory=list)
     completed_chunks_count: int = Field(default=0, ge=0)
+    audio_sha256: Optional[str] = None
+    model_id: Optional[str] = None
+    chunk_segments: Dict[str, List[ASRSegment]] = Field(default_factory=dict)
+    checkpoint_version: int = 0
     global_speaker_mapping: Dict[str, str] = Field(
         default_factory=dict,
         description="Maps 'chunk_{i}:{local_speaker}' -> 'global_speaker'"
@@ -290,6 +294,7 @@ class LongAudioProcessor:
                     detected_language=seg.detected_language,
                     words=offset_words,
                     confidence=seg.confidence,
+                    metadata=dict(seg.metadata),
                 )
             )
         return offset_segments
@@ -411,6 +416,7 @@ class LongAudioProcessor:
                         detected_language=seg.detected_language,
                         words=seg.words,
                         confidence=seg.confidence,
+                        metadata=dict(seg.metadata),
                     )
                 )
 
@@ -558,6 +564,27 @@ class LongAudioProcessor:
         audio_meta = validate_audio(audio_file_path)
         total_duration = audio_meta["duration"]
 
+        import hashlib
+        import json
+        settings = get_settings()
+        state_root = Path(settings.AUDIO_CHUNK_STATE_DIR) if settings.AUDIO_CHUNK_STATE_DIR else None
+        digest = None
+        history = state_root / str(meeting_id) if state_root else None
+        if history:
+            hasher = hashlib.sha256()
+            with open(audio_file_path, "rb") as source:
+                for data in iter(lambda: source.read(1024 * 1024), b""):
+                    hasher.update(data)
+            digest = hasher.hexdigest()
+            checkpoints = sorted(history.glob("state_*.json")) if history.exists() else []
+            if not initial_state and checkpoints:
+                initial_state = ChunkProcessingState.model_validate_json(checkpoints[-1].read_text())
+            if initial_state and (initial_state.audio_sha256 != digest or
+                initial_state.chunk_duration_seconds != self.chunk_duration or
+                initial_state.overlap_duration_seconds != self.overlap_duration or
+                initial_state.model_id != settings.OPENMOSS_MODEL_ID):
+                raise RuntimeError("Saved chunk checkpoint differs from actual audio/model/configuration; refusing stale resume")
+
         # 1. State initialization or resumption
         if initial_state and initial_state.chunks:
             state = initial_state
@@ -573,7 +600,18 @@ class LongAudioProcessor:
                 total_chunks=len(chunks),
                 chunks=chunks,
                 overall_status="processing",
+                audio_sha256=digest,
+                model_id=settings.OPENMOSS_MODEL_ID,
             )
+
+        def save_state():
+            if history:
+                history.mkdir(parents=True, exist_ok=True)
+                state.checkpoint_version += 1
+                target = history / f"state_{state.checkpoint_version:08d}.json"
+                with target.open("x", encoding="utf-8") as output:
+                    output.write(state.model_dump_json(indent=2))
+        save_state()
 
         # Emit initial processing event
         await self._emit_chunk_event(
@@ -595,6 +633,11 @@ class LongAudioProcessor:
             # 2. Process chunks sequentially or with bounded concurrency
             for idx, chunk_meta in enumerate(state.chunks):
                 if chunk_meta.status == "completed":
+                    restored = state.chunk_segments.get(str(chunk_meta.chunk_id))
+                    if restored is None and get_settings().EXECUTION_MODE.upper() == "REAL":
+                        raise RuntimeError("REAL resume requires saved actual chunk transcripts")
+                    if restored is not None:
+                        chunk_results.append((chunk_meta, restored))
                     logger.info(f"Chunk {idx}/{state.total_chunks} already completed. Skipping.")
                     continue
 
@@ -626,7 +669,7 @@ class LongAudioProcessor:
                     elif isinstance(raw_segments, list):
                         local_segments = raw_segments
                     else:
-                        local_segments = []
+                        raise TypeError("Chunk provider must return ASRResult or a list of actual ASR segments")
 
                     # Reconstruct global timestamps for this chunk
                     global_segments = self.offset_segments_to_global_time(
@@ -635,11 +678,13 @@ class LongAudioProcessor:
                     )
 
                     chunk_results.append((chunk_meta, global_segments))
+                    state.chunk_segments[str(chunk_meta.chunk_id)] = global_segments
 
                     chunk_meta.status = "completed"
                     chunk_meta.processed_at = datetime.utcnow()
                     state.completed_chunks_count += 1
                     state.updated_at = datetime.utcnow()
+                    save_state()
 
                     await self._emit_chunk_event(
                         meeting_id=meeting_id,
@@ -658,6 +703,7 @@ class LongAudioProcessor:
                     chunk_meta.error_message = str(chunk_err)
                     chunk_meta.retry_count += 1
                     state.updated_at = datetime.utcnow()
+                    save_state()
 
                     logger.error(f"Error processing chunk {idx} for meeting {meeting_id}: {chunk_err}")
                     await self._emit_chunk_event(
@@ -687,23 +733,20 @@ class LongAudioProcessor:
             # 5. Construct full transcript and language distribution
             full_transcript = " ".join([s.transcript for s in final_segments if s.transcript])
             detected_languages = sorted(list(set(s.detected_language for s in final_segments if s.detected_language)))
-            if not detected_languages:
-                detected_languages = ["en"]
 
             lang_distribution: Dict[str, float] = {}
             if final_segments:
                 for s in final_segments:
-                    lang = s.detected_language or "en"
-                    lang_distribution[lang] = lang_distribution.get(lang, 0.0) + 1.0
+                    if s.detected_language:
+                        lang = s.detected_language
+                        lang_distribution[lang] = lang_distribution.get(lang, 0.0) + 1.0
                 for l in lang_distribution:
                     lang_distribution[l] = round(lang_distribution[l] / len(final_segments), 4)
 
             # Overall confidence from segments
-            overall_conf = (
-                sum(s.confidence for s in final_segments) / len(final_segments)
-                if final_segments
-                else 0.95
-            )
+            measured_confidences = [s.confidence for s in final_segments if s.confidence is not None]
+            overall_conf = (sum(measured_confidences) / len(measured_confidences)
+                            if measured_confidences else None)
 
             asr_result = ASRResult(
                 meeting_id=meeting_id,
@@ -711,7 +754,7 @@ class LongAudioProcessor:
                 detected_languages=detected_languages,
                 language_distribution=lang_distribution,
                 segments=final_segments,
-                overall_confidence=round(overall_conf, 4),
+                overall_confidence=round(overall_conf, 4) if overall_conf is not None else None,
                 metadata={
                     "is_chunked": True,
                     "total_chunks": state.total_chunks,
@@ -720,11 +763,15 @@ class LongAudioProcessor:
                     "deduplicated_segments_count": dedup_count,
                     "global_speakers": sorted(list(set(global_spk_map.values()))),
                     "provenance": "ASR:ChunkedLongAudioProcessor",
+                    "chunks": [chunk.model_dump(mode="json") for chunk in state.chunks],
+                    "speaker_mapping": global_spk_map,
+                    "correlation_id": corr_id,
                 },
             )
 
             state.overall_status = "completed"
             state.updated_at = datetime.utcnow()
+            save_state()
 
             await self._emit_chunk_event(
                 meeting_id=meeting_id,
