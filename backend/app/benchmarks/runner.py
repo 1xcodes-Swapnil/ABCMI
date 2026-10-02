@@ -114,9 +114,13 @@ class BenchmarkRunner:
                 from app.ai.speaker_diarization import SpeakerDiarizationEngine
                 import asyncio
                 import uuid
+                from app.core.config import get_settings
+                settings = get_settings()
                 provider = OpenMOSSProvider({
                     "model_id": model_name,
                     "device": device,
+                    "cache_dir": settings.OPENMOSS_CACHE_DIR,
+                    "token": settings.HF_TOKEN,
                 })
                 sd_engine = SpeakerDiarizationEngine()
                 
@@ -151,7 +155,7 @@ class BenchmarkRunner:
                                         expected_speakers=None
                                     ))
                                 except Exception as sd_err:
-                                    print(f"[BENCHMARK WARNING] PyAnnote diarization failed: {sd_err}")
+                                    raise RuntimeError("Required REAL PyAnnote inference failed") from sd_err
                             
                             result_holder.append((moss_res, pyannote_res))
                             l.close()
@@ -209,7 +213,7 @@ class BenchmarkRunner:
                     )
                     
                     experiment_c = {
-                        "accuracy": verification_report["accuracy"],
+                        "agreement_ratio": verification_report["accuracy"],
                         "speaker_mapping": verification_report["speaker_mapping"],
                         "disagreements": verification_report["disagreements"],
                     }
@@ -218,7 +222,7 @@ class BenchmarkRunner:
                     print(f"RESEARCH EXPERIMENT COMPARISON for Sample {sample.sample_id}:")
                     print(f"- Experiment A (MOSS Native Speaker Turns): {len(segments)} segments")
                     print(f"- Experiment B (PyAnnote Independent): {len(pyannote_res.speaker_turns)} segments")
-                    print(f"- Experiment C (MOSS + PyAnnote Verification Accuracy): {verification_report['accuracy']*100:.2f}%")
+                    print(f"- Experiment C (MOSS/PyAnnote agreement, not accuracy): {verification_report['accuracy']*100:.2f}%")
                     if verification_report["disagreements"]:
                         print(f"  Disagreements recorded: {len(verification_report['disagreements'])}")
                         for diag in verification_report["disagreements"][:3]:
@@ -254,6 +258,9 @@ class BenchmarkRunner:
             raise RuntimeError(f"Real model inference failed: {model_ex}") from model_ex
 
         elapsed_time = time.perf_counter() - start_time
+
+        if not predicted_segments or not predicted_text.strip():
+            raise RuntimeError("REAL inference returned no transcript segments")
 
         return {
             "predicted_transcript": predicted_text,
@@ -418,7 +425,7 @@ class BenchmarkRunner:
                 if sample.reference_transcript:
                     rec.ground_truth_transcript = sample.reference_transcript
                     # For Chinese Mandarin or CJK, compute CER
-                    if sample.language in ("zh", "ja"):
+                    if sample.reference_transcript:
                         cer_res = calculate_cer(sample.reference_transcript, rec.predicted_transcript)
                         rec.cer = cer_res["cer"]
                         cer_values.append(rec.cer)

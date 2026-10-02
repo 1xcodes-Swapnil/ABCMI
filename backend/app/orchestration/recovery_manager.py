@@ -63,6 +63,12 @@ class RecoveryManager:
             "correlation_id": correlation_id,
         })
 
+        if "cuda out of memory" in error_message.lower():
+            return RecoveryDecision(action="RECOVERY_REQUIRED", task_id=task.task_id,
+                retry_count=task.retry_count, max_retries=max_retries,
+                reason="CUDA OOM requires a resource/chunk configuration change; identical retries are unsafe",
+                error_details=details)
+
         if next_retry_count <= max_retries:
             logger.info(
                 f"Task {task.task_id} ({task.task_type}) failed. "

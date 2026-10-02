@@ -5,14 +5,20 @@ Manages environment variables, infrastructure connection parameters, and runtime
 
 from functools import lru_cache
 import json
+from pathlib import Path
 from typing import List, Optional, Union
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]
+_BACKEND_ENV_FILE = _BACKEND_ROOT / ".env"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Resolve the backend config regardless of whether the CLI/server is
+        # launched from the repository root, backend/, or the Docker workdir.
+        env_file=_BACKEND_ENV_FILE,
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
@@ -141,14 +147,32 @@ class Settings(BaseSettings):
     EXECUTION_MODE: str = "FIXTURE"  # REAL, FIXTURE, MOCK
     OPENMOSS_MODEL_ID: str = "OpenMOSS-Team/MOSS-Transcribe-Diarize"
     OPENMOSS_DEVICE: str = "cpu"  # cpu, cuda, auto
+    OPENMOSS_MAX_NEW_TOKENS: int = 5120
     OPENMOSS_CACHE_DIR: Optional[str] = None
+
+    @field_validator("OPENMOSS_CACHE_DIR", mode="before")
+    @classmethod
+    def resolve_openmoss_cache_dir(cls, value: Optional[str]) -> Optional[str]:
+        """Keep model cache lookup stable when launched from a different CWD."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return str(_BACKEND_ROOT)
+        cache_dir = Path(value).expanduser()
+        if not cache_dir.is_absolute():
+            cache_dir = _BACKEND_ROOT / cache_dir
+        return str(cache_dir.resolve())
+
     HF_TOKEN: Optional[str] = None
+    HF_HOME: Optional[str] = None
+    SEMANTIC_EMBEDDING_MODEL_ID: str = "sentence-transformers/all-MiniLM-L6-v2"
+    SEMANTIC_EMBEDDING_DEVICE: str = "cpu"
+    HUGGINGFACE_HUB_CACHE: Optional[str] = None
 
     # Long-Meeting Chunking & Audio Processing Configuration (Phase 4.26)
     AUDIO_CHUNK_DURATION_SECONDS: float = 600.0  # 10 minutes chunk duration
     AUDIO_CHUNK_OVERLAP_SECONDS: float = 30.0    # 30 seconds overlap window
     AUDIO_CHUNK_THRESHOLD_SECONDS: float = 600.0  # Audio duration threshold to trigger chunking
     AUDIO_CHUNK_CONCURRENCY: int = 1             # Bounded concurrency (default 1 sequential for VRAM safety)
+    AUDIO_CHUNK_STATE_DIR: Optional[str] = None
 
     # -------------------------------------------------------------------------
     # Google Workspace & Google Meet Integration Configuration

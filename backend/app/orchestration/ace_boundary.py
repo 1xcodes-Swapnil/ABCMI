@@ -585,10 +585,20 @@ class ACEAdaptiveBlackboardAdapter:
         confidence_score: Optional[float] = 0.90,
         auth_context: Optional[Dict[str, Any]] = None,
         correlation_id: Optional[str] = None,
+        knowledge_data: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Persist a final knowledge object to SKW through authorized Blackboard client.
         """
+        from app.core.config import get_settings
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            obj = dict(knowledge_data or {})
+            raw = {"meeting_id": str(meeting_id), "object_type": object_type, "content": content,
+                   "source_module": source_module, "confidence_score": confidence_score,
+                   "title": obj.get("title"), "provenance": obj.get("provenance", {}),
+                   "metadata": {"language": "und"}, "payload": obj.get("payload", {})}
+            return await self.blackboard_skw_client.store_real_knowledge_object(
+                meeting_id, raw, auth_context, correlation_id)
         raw_data = {
             "knowledge_id": str(uuid.uuid4()),
             "meeting_id": str(meeting_id),

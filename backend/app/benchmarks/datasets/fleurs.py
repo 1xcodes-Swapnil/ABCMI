@@ -152,6 +152,13 @@ class FLEURSDatasetAdapter(BaseDatasetAdapter):
         root = self._resolve_root(target_dir)
         lang_dir = os.path.join(root, language)
 
+        # A Hugging Face snapshot stores genuine audio and annotations together.
+        # Read locally only; materialize selected audio outside the shared cache.
+        from pathlib import Path
+        parquet_root = Path(root) / "parquet-data" / language
+        if parquet_root.is_dir():
+            return self._load_cached_parquet(parquet_root, target_dir, max_samples, language, split)
+
         if not os.path.isdir(lang_dir):
             raise DatasetNotFoundError(
                 dataset_name="FLEURS",
@@ -229,6 +236,53 @@ class FLEURSDatasetAdapter(BaseDatasetAdapter):
 
         return samples
 
+    def _load_cached_parquet(self, root, target_dir, max_samples, language, split):
+        import hashlib
+        import io
+        from pathlib import Path
+        import pyarrow.parquet as pq
+        import soundfile as sf
+
+        samples = []
+        output = Path(target_dir) / "fleurs_audio" / language / split
+        for shard in sorted(root.glob(f"{split}-*.parquet")):
+            for batch in pq.ParquetFile(shard).iter_batches(batch_size=1):
+                row = batch.to_pylist()[0]
+                audio = row.get("audio", {}).get("bytes")
+                transcript = row.get("transcription") or row.get("raw_transcription")
+                if not audio:
+                    raise MissingAudioError(dataset_name=self.name, sample_id=str(row.get("id")), expected_path=str(shard))
+                if not transcript:
+                    raise MissingAnnotationsError(dataset_name=self.name, sample_id=str(row.get("id")), expected_file=str(shard))
+                info = sf.info(io.BytesIO(audio))
+                if info.duration <= 0:
+                    raise ValueError("Cached FLEURS audio has no measured duration")
+                digest = hashlib.sha256(audio).hexdigest()
+                output.mkdir(parents=True, exist_ok=True)
+                suffix = ".wav" if info.format == "WAV" else ".flac"
+                path = output / f"{row['id']}_{digest[:12]}{suffix}"
+                if not path.exists():
+                    path.write_bytes(audio)
+                elif hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                    raise ValueError("Materialized FLEURS audio differs from cached bytes")
+                sample = BenchmarkSample(
+                    sample_id=f"fleurs_{language}_{row['id']}", dataset_name=self.name,
+                    dataset_version=self.version, audio_path=str(path), audio_format=info.format.lower(),
+                    duration_seconds=info.duration, language=language.split("_")[0],
+                    reference_transcript=transcript, ground_truth_status="ground_truth_available",
+                    metadata={"split": split, "fleurs_language_code": language,
+                              "sample_rate": info.samplerate, "channels": info.channels,
+                              "cache_revision": root.parent.parent.name,
+                              "source_shard": shard.name, "source_row_id": row['id']},
+                )
+                sample.compute_sha256()
+                samples.append(sample)
+                if len(samples) >= max_samples:
+                    return samples
+        if not samples:
+            raise MissingAudioError(dataset_name=self.name, sample_id=language, expected_path=str(root))
+        return samples
+
     def _get_wav_duration(self, path: str) -> float:
         """Return audio duration in seconds without heavy dependencies."""
         try:
@@ -236,11 +290,8 @@ class FLEURSDatasetAdapter(BaseDatasetAdapter):
             with wv.open(path) as wf:
                 return wf.getnframes() / wf.getframerate()
         except Exception:
-            try:
-                size = os.path.getsize(path)
-                return max(1.0, (size - 44) / (16000 * 2))
-            except Exception:
-                return 0.0
+            import soundfile as sf
+            return sf.info(path).duration
 
     def list_available_languages(self) -> List[str]:
         """Return all FLEURS language codes supported by this adapter."""

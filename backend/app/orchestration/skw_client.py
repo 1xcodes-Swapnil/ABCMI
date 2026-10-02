@@ -82,6 +82,33 @@ class BlackboardSKWClient:
 
         return auth_context
 
+    async def store_real_knowledge_object(self, meeting_id, raw_data, auth_context, correlation_id=None):
+        """Write via existing SKW services and verify actual database/vector read-back."""
+        self._validate_auth(auth_context, meeting_id, correlation_id)
+        from app.skw.services.ingestion_service import DefaultKnowledgeIngestionService
+        from app.skw.services.version_manager import DefaultVersionManager
+        from app.skw.events.publisher import SKWEventPublisher
+        session = self.query_engine.session
+        canonical = await DefaultKnowledgeIngestionService().ingest_raw_knowledge(meeting_id, raw_data)
+        stored = await DefaultVersionManager(session).create_version(meeting_id=meeting_id,
+            object_type=canonical.object_type, source_module=canonical.source_module,
+            content=canonical.content, title=canonical.title, confidence_score=canonical.confidence_score,
+            provenance=canonical.provenance, metadata=canonical.metadata, payload=canonical.payload)
+        canonical.knowledge_id = stored.id
+        await DefaultVersionManager(session).transition_lifecycle(stored.id, "accepted")
+        point_id = await self.query_engine.semantic_indexer.index_knowledge_object(canonical, session=session)
+        await session.refresh(stored)
+        if stored.content != canonical.content or stored.qdrant_point_id != point_id:
+            raise RuntimeError("REAL SKW database read-back differs from the stored object")
+        client = await self.query_engine.semantic_indexer._get_client()
+        points = await client.retrieve(collection_name=self.query_engine.semantic_indexer.collection_name,
+                                       ids=[point_id], with_payload=True, with_vectors=True)
+        if len(points) != 1 or points[0].payload.get("content") != canonical.content:
+            raise RuntimeError("REAL SKW vector read-back failed")
+        published = await SKWEventPublisher().publish_indexed(canonical, point_id, correlation_id=correlation_id)
+        return {"knowledge_id": str(stored.id), "persistence_status": "COMMITTED", "read_back": "passed",
+                "qdrant_read_back": "passed", "event_published": published, "content": stored.content}
+
     async def _record_audit(
         self,
         action: str,

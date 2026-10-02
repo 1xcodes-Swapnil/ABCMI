@@ -31,8 +31,8 @@ class ConfidenceFusionResult(CoreBaseModel):
     """Fused confidence processing result payload."""
 
     meeting_id: uuid.UUID
-    fused_confidence: float = Field(..., ge=0.0, le=1.0, description="Normalized score [0.0, 1.0]")
-    is_low_confidence: bool = Field(default=False, description="True if fused confidence < threshold")
+    fused_confidence: Optional[float] = Field(..., ge=0.0, le=1.0, description="Measured normalized score, if available")
+    is_low_confidence: Optional[bool] = Field(default=False, description="Unknown when no measured signals exist")
     confidence_threshold: float = Field(default=0.70)
     signal_breakdown: Dict[str, float] = Field(default_factory=dict)
     weights_applied: Dict[str, float] = Field(default_factory=dict)
@@ -89,9 +89,12 @@ class ConfidenceFusionEngine:
                 valid_signals[sig_name] = clamped_val
 
         if not valid_signals:
-            # Fallback neutral score if no signals provided
-            fused_score = 0.75
-            weights_used = {"fallback_neutral": 1.0}
+            from app.core.config import get_settings
+            if get_settings().EXECUTION_MODE.upper() == "REAL":
+                fused_score, weights_used = None, {}
+            else:
+                fused_score = 0.75
+                weights_used = {"fallback_neutral": 1.0}
         else:
             # Calculate total weight of available signals
             total_available_weight = sum(
@@ -120,8 +123,8 @@ class ConfidenceFusionEngine:
             fused_score = max(0.0, min(1.0, weighted_sum - penalty_factor))
             weights_used = applied_weights
 
-        fused_score = round(fused_score, 4)
-        is_low = fused_score < self.confidence_threshold
+        fused_score = round(fused_score, 4) if fused_score is not None else None
+        is_low = fused_score < self.confidence_threshold if fused_score is not None else None
 
         prov = ProvenanceMetadataSchema(
             producing_module=source_module,

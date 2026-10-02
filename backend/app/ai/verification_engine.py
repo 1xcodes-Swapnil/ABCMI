@@ -21,7 +21,7 @@ class VerificationResult(CoreBaseModel):
     meeting_id: uuid.UUID
     target_object_id: Optional[uuid.UUID] = None
     target_object_type: str
-    confidence_score: float = Field(..., ge=0.0, le=1.0)
+    confidence_score: Optional[float] = Field(..., ge=0.0, le=1.0)
     confidence_threshold: float = Field(default=0.70)
     verification_passed: bool
     status: KnowledgeObjectStatus
@@ -53,7 +53,7 @@ class VerificationEngine:
         meeting_id: uuid.UUID,
         object_type: str,
         content: str,
-        confidence_score: float,
+        confidence_score: Optional[float],
         title: Optional[str] = None,
         correlation_id: Optional[str] = None,
         source_module: str = "verification_engine",
@@ -63,8 +63,8 @@ class VerificationEngine:
         Evaluates AI output confidence score and builds a compliant KnowledgeObjectCreate schema.
         Routes output to ACTIVE state if confidence >= threshold, or DRAFT state if < threshold.
         """
-        confidence = max(0.0, min(1.0, float(confidence_score)))
-        is_high_confidence = confidence >= self.confidence_threshold
+        confidence = max(0.0, min(1.0, float(confidence_score))) if confidence_score is not None else None
+        is_high_confidence = confidence is not None and confidence >= self.confidence_threshold
 
         lifecycle_status = (
             KnowledgeObjectStatus.ACTIVE if is_high_confidence else KnowledgeObjectStatus.DRAFT
@@ -112,6 +112,7 @@ class VerificationEngine:
             verification_notes=(
                 "Passed automatic confidence verification threshold"
                 if is_high_confidence
+                else "Confidence unavailable; requires verification" if confidence is None
                 else "Confidence below threshold; queued for verification review"
             ),
             correlation_id=correlation_id,

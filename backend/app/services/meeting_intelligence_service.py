@@ -610,6 +610,10 @@ class MeetingIntelligenceService:
 
         if not ko:
             # Fallback placeholder if summary is not yet synthesized
+            from app.core.config import get_settings
+            if get_settings().EXECUTION_MODE.upper() == "REAL":
+                raise NotFoundException(message="REAL semantic summary has not been generated",
+                                        code="SUMMARY_NOT_AVAILABLE")
             return SummaryResponse(
                 id=uuid.uuid4(),
                 meeting_id=meeting_id,

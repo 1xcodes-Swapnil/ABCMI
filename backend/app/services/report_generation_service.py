@@ -117,6 +117,10 @@ class ReportGenerationService:
                     confidence_statuses.append(ko.confidence)
 
             avg_confidence = sum(confidence_statuses) / len(confidence_statuses) if confidence_statuses else 1.0
+            from app.core.config import get_settings
+            real = get_settings().EXECUTION_MODE.upper() == "REAL"
+            if real and not confidence_statuses:
+                avg_confidence = None
 
             # Compile structured sections
             sections = [
@@ -171,6 +175,10 @@ class ReportGenerationService:
                 },
             ]
 
+            if real:
+                for section in sections:
+                    section["confidence"] = avg_confidence
+                    section["verification_status"] = "NOT_VERIFIED"
             report_payload = {
                 "report_id": str(report_id),
                 "meeting_id": str(meeting_id),
