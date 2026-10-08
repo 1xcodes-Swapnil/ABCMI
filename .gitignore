@@ -140,6 +140,9 @@ benchmark_results/
 # Keep concise validation documentation and contract checks, not local run data.
 /e2e_validation/*
 !/e2e_validation/README.md
-!/e2e_validation/CHECKPOINT.md
 !/e2e_validation/execution_log.md
 !/e2e_validation/test_real_contracts.py
+
+# Local development history and execution checkpoints
+DEVELOPMENT_LOG_BOOK.md
+CHECKPOINT.md
