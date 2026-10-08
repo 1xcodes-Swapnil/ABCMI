@@ -100,6 +100,8 @@ aws/
 .huggingface/
 huggingface/
 
+data/
+
 # Local Overrides & Machine-Specific Config
 local_settings.py
 local_config.py
@@ -116,6 +118,7 @@ __pycache__/
 .pytest_cache/
 venv/
 .venv/
+.runtime/
 env/
 *.db
 *.sqlite
@@ -123,5 +126,20 @@ env/
 
 
 # Generated backend audio, reports, model caches, and cache markers
+models--*/
+datasets--*/
+CACHEDIR.TAG
 
 # Benchmark results, model weight extensions, and large binary artifacts
+benchmark results/
+benchmark_results/
+*.safetensors
+*.gguf
+*.onnx
+
+# Keep concise validation documentation and contract checks, not local run data.
+/e2e_validation/*
+!/e2e_validation/README.md
+!/e2e_validation/CHECKPOINT.md
+!/e2e_validation/execution_log.md
+!/e2e_validation/test_real_contracts.py

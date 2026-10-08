@@ -50,6 +50,7 @@ class MeetingUnderstandingResult(CoreBaseModel):
     item_counts: Dict[str, int] = Field(default_factory=dict)
     correlation_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    generation_metadata: Optional[Dict[str, Any]] = None
 
 
 class MeetingUnderstandingEngine:
@@ -119,9 +120,48 @@ class MeetingUnderstandingEngine:
             knowledge = KnowledgeObjectCreate(meeting_id=meeting_id, object_type=item.object_type,
                 title=item.title, content=item.content, confidence=None, status=item.status,
                 provenance=provenance, payload=item.payload)
-            return MeetingUnderstandingResult(meeting_id=meeting_id, knowledge_objects=[knowledge],
-                extracted_items=[item], overall_confidence=None, item_counts={"transcript_insight": 1},
-                correlation_id=correlation_id)
+            knowledge_objects, extracted_items = [knowledge], [item]
+            counts = {"transcript_insight": 1}
+            generation = None
+            if get_settings().TEXT_AI_PROVIDER.lower() == "gemini":
+                from app.ai.grounded_meeting_text import extract_meeting_items
+                settings = get_settings()
+                import json
+                input_characters = len(json.dumps({"turns": context.get("turns", [])}, ensure_ascii=False))
+                if input_characters > settings.GEMINI_MAX_INPUT_CHARACTERS:
+                    # Preserve the real transcript when a long meeting exceeds
+                    # the separate text provider's input budget.
+                    candidates = []
+                    generation = {"status": "DEFERRED", "reason": "text_input_limit",
+                        "model": settings.GEMINI_MODEL, "input_characters": input_characters,
+                        "limit_characters": settings.GEMINI_MAX_INPUT_CHARACTERS,
+                        "inference_executed": False}
+                else:
+                    candidates, generation = await extract_meeting_items(context.get("turns", []))
+                for candidate in candidates:
+                    prov = ProvenanceMetadataSchema(producing_module="meeting_understanding",
+                        model_name=generation["model"], model_version=generation.get("model_version"),
+                        source_segments=candidate["source_segments"], source_intervals=candidate["source_intervals"],
+                        processing_metadata={**generation, "correlation_id": correlation_id,
+                            "citation_quotes_validated": True, "semantic_accuracy": "NOT_VERIFIED"})
+                    extra = {"requires_verification": True, "citations": candidate["citations"],
+                             "source_segments": candidate["source_segments"], "source_intervals": candidate["source_intervals"]}
+                    if candidate["object_type"] == "action_item":
+                        extra.update(status="open", assignee=candidate.get("assignee"), due_date_text=candidate.get("due_date"))
+                    created = KnowledgeObjectCreate(meeting_id=meeting_id, object_type=candidate["object_type"],
+                        title=candidate["title"], content=candidate["content"], confidence=None,
+                        status=KnowledgeObjectStatus.DRAFT, provenance=prov, payload=extra)
+                    knowledge_objects.append(created)
+                    extracted_items.append(ExtractedKnowledgeObject(meeting_id=meeting_id, object_type=created.object_type,
+                        title=created.title, content=created.content, confidence=None, status=created.status,
+                        provenance=prov, payload=extra, source_segments=candidate["source_segments"],
+                        source_intervals=candidate["source_intervals"], correlation_id=correlation_id))
+                    counts[created.object_type] = counts.get(created.object_type, 0) + 1
+            elif get_settings().TEXT_AI_PROVIDER.lower() != "disabled":
+                raise ValueError("Unsupported REAL text provider configuration")
+            return MeetingUnderstandingResult(meeting_id=meeting_id, knowledge_objects=knowledge_objects,
+                extracted_items=extracted_items, overall_confidence=None, item_counts=counts,
+                correlation_id=correlation_id, generation_metadata=generation)
         if not transcript_text:
             return MeetingUnderstandingResult(
                 meeting_id=meeting_id,

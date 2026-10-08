@@ -118,7 +118,19 @@ class FLEURSDatasetAdapter(BaseDatasetAdapter):
         records: Dict[str, Dict[str, Any]] = {}
         if not os.path.exists(tsv_path):
             return records
+        import csv
         with open(tsv_path, "r", encoding="utf-8") as f:
+            header = f.readline().rstrip("\r\n").split("\t")
+            if "raw_transcription" in header and "path" in header:
+                for row in csv.DictReader(f, fieldnames=header, delimiter="\t", quoting=csv.QUOTE_NONE):
+                    path = (row.get("path") or "").strip()
+                    key = os.path.splitext(os.path.basename(path))[0]
+                    if key:
+                        records[key] = {"raw_transcription": row.get("raw_transcription", ""),
+                            "transcription": row.get("transcription", ""), "path": path,
+                            "source_id": row.get("id")}
+                return records
+            f.seek(0)
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("id\t"):

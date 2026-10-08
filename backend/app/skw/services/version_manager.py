@@ -114,7 +114,7 @@ class DefaultVersionManager:
             version=1,
             parent_id=None,
             provenance=provenance or {},
-            metadata=metadata or {},
+            knowledge_metadata=metadata or {},
             payload=payload or {},
         )
         self.session.add(obj)
@@ -235,7 +235,7 @@ class DefaultVersionManager:
 
         # Build provenance with lineage and change info
         existing_prov = current_obj.provenance or {}
-        lineage = existing_prov.get("lineage", {})
+        lineage = dict(existing_prov.get("lineage", {}))
         lineage["revised_from_id"] = str(current_obj.id)
         lineage["previous_version"] = current_obj.version
         lineage["change_info"] = change_info or {"updated_at": datetime.utcnow().isoformat()}
@@ -256,7 +256,7 @@ class DefaultVersionManager:
             version=new_version_num,
             parent_id=current_obj.id,
             provenance=new_prov,
-            metadata=update_data.get("metadata", current_obj.metadata),
+            knowledge_metadata=update_data.get("metadata", current_obj.knowledge_metadata),
             payload=update_data.get("payload", current_obj.payload),
         )
 
@@ -295,7 +295,7 @@ class DefaultVersionManager:
         new_version_num = (current_latest.version if current_latest else hist_obj.version) + 1
 
         new_prov = dict(hist_obj.provenance or {})
-        lineage = new_prov.get("lineage", {})
+        lineage = dict(new_prov.get("lineage", {}))
         lineage["restored_from_version"] = target_version
         lineage["restored_from_id"] = str(hist_obj.id)
         new_prov["lineage"] = lineage
@@ -311,7 +311,7 @@ class DefaultVersionManager:
             version=new_version_num,
             parent_id=hist_obj.id,
             provenance=new_prov,
-            metadata=hist_obj.metadata,
+            knowledge_metadata=hist_obj.knowledge_metadata,
             payload=hist_obj.payload,
         )
 

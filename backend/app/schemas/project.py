@@ -164,7 +164,7 @@ class RecurringTopicItem(CoreBaseModel):
     keywords: List[str] = Field(default_factory=list)
     first_seen: Optional[datetime] = None
     last_seen: Optional[datetime] = None
-    average_confidence: float = 1.0
+    average_confidence: Optional[float] = None
 
 
 class RecurringTopicsResponse(CoreBaseModel):

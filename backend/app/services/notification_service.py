@@ -86,16 +86,11 @@ class RealtimeDeliveryAdapter:
         payload = self.build_payload(notification, event_type=event_type)
         payload_dict = payload.model_dump()
 
-        # Publish to tenant-wide notification channel
-        tenant_channel = f"abci.notifications.{notification.tenant_id}"
-        delivered = await self.event_bus.publish(tenant_channel, payload_dict)
-
-        # If targeted to a specific user, also publish to user-scoped channel
+        # A user-targeted payload must never be broadcast to the whole tenant.
+        channel = f"abci.notifications.{notification.tenant_id}"
         if notification.user_id:
-            user_channel = f"abci.notifications.{notification.tenant_id}.{notification.user_id}"
-            await self.event_bus.publish(user_channel, payload_dict)
-
-        return delivered
+            channel += f".{notification.user_id}"
+        return await self.event_bus.publish(channel, payload_dict)
 
 
 # -----------------------------------------------------------------------------
@@ -295,6 +290,13 @@ class NotificationService:
         """
         # Idempotency check: if event_id is provided, check if already recorded
         if payload.event_id:
+            # Multiple API listeners may receive the same Pub/Sub event. Serialize
+            # the lookup+insert in PostgreSQL without altering historical rows.
+            import hashlib
+            from sqlalchemy import text
+            key = int.from_bytes(hashlib.sha256(f"{payload.tenant_id}:{payload.event_id}".encode()).digest()[:8], "big", signed=True)
+            if self.db.bind.dialect.name == "postgresql":
+                await self.db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
             existing = await self.repo.get_by_event_id(payload.tenant_id, payload.event_id)
             if existing:
                 logger.info(f"Duplicate event_id '{payload.event_id}' for tenant '{payload.tenant_id}'. Returning existing.")
@@ -846,13 +848,16 @@ class NotificationService:
         """
         Returns an asynchronous event handler callback compatible with RedisEventBus.subscribe().
         """
+        if getattr(self, "_event_handler", None) is not None:
+            return self._event_handler
         async def _handler(event_payload: Dict[str, Any]) -> None:
             try:
                 await self.consume_event(event_payload)
             except Exception as e:
                 logger.error(f"Error in NotificationService event handler: {e}", exc_info=True)
 
-        return _handler
+        self._event_handler = _handler
+        return self._event_handler
 
     def subscribe_to_event_bus(
         self,

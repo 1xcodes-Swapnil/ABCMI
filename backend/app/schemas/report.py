@@ -13,7 +13,7 @@ from app.schemas.base import CoreBaseModel
 class ReportRequest(CoreBaseModel):
     """Payload to trigger report generation for a meeting."""
     report_type: Optional[str] = Field(default="comprehensive", description="Report type e.g. comprehensive, executive, technical")
-    format: Optional[str] = Field(default="json", description="Output format: json, markdown, txt, pdf")
+    format: Optional[str] = Field(default="json", description="Output format: json, markdown, txt, pdf, html (multilingual printable)")
     include_analytics: Optional[bool] = Field(default=True, description="Whether to include analytics and metrics")
     correlation_id: Optional[str] = Field(default=None, description="Correlation identifier")
 
@@ -61,7 +61,7 @@ class ReportResponse(CoreBaseModel):
 
 class ExportRequest(CoreBaseModel):
     """Payload to request report export in a specific format."""
-    format: str = Field(..., description="Target export format: json, markdown, txt, pdf")
+    format: str = Field(..., description="Target export format: json, markdown, txt, pdf, html (multilingual printable)")
     correlation_id: Optional[str] = Field(default=None, description="Correlation identifier")
 
 

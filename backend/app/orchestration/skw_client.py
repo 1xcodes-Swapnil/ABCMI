@@ -98,7 +98,7 @@ class BlackboardSKWClient:
         await DefaultVersionManager(session).transition_lifecycle(stored.id, "accepted")
         point_id = await self.query_engine.semantic_indexer.index_knowledge_object(canonical, session=session)
         await session.refresh(stored)
-        if stored.content != canonical.content or stored.qdrant_point_id != point_id:
+        if stored.content != canonical.content or stored.qdrant_point_id != point_id or stored.knowledge_metadata != canonical.metadata:
             raise RuntimeError("REAL SKW database read-back differs from the stored object")
         client = await self.query_engine.semantic_indexer._get_client()
         points = await client.retrieve(collection_name=self.query_engine.semantic_indexer.collection_name,

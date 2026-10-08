@@ -34,7 +34,7 @@ class QueryRecord(BaseModel):
     )
     answer: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="answered", index=True)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.8)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     is_low_confidence: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     requires_verification: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     search_mode: Mapped[str] = mapped_column(String(50), nullable=False, default="hybrid")

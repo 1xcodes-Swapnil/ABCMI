@@ -70,3 +70,8 @@ class LiveSessionStatusResponse(CoreBaseModel):
     session: LiveSessionResponse
     recent_chunks: List[AudioChunkResponse] = Field(default_factory=list)
     processing_state: str = Field(default="idle", description="Incremental processing provider state")
+    pending_jobs: int = 0
+    failed_jobs: int = 0
+    jobs: List[Dict[str, Any]] = Field(default_factory=list)
+    chunk_seconds: float
+    overlap_seconds: float

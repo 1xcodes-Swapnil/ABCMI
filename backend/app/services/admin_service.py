@@ -168,9 +168,10 @@ class AdminService:
         Lists tenant users with pagination, role, and search filters.
         Enforces Admin RBAC.
         """
-        self._extract_admin_context(auth_context)
+        tenant_id, _, _ = self._extract_admin_context(auth_context)
 
         users, total = await self.user_repo.list_users_filtered(
+            tenant_id=tenant_id,
             role=role,
             status=status,
             search=search,
@@ -181,7 +182,7 @@ class AdminService:
         user_dtos: List[AdminUserResponse] = []
         for user in users:
             # Query count of meetings hosted by this user
-            count_query = select(func.count(Meeting.id)).where(Meeting.host_id == user.id)
+            count_query = select(func.count(Meeting.id)).where(Meeting.host_id == user.id, Meeting.tenant_id == tenant_id)
             count_result = await self.db.execute(count_query)
             hosted_count = count_result.scalar() or 0
 
@@ -216,14 +217,15 @@ class AdminService:
         Fetches an individual user profile for administrative inspection.
         Enforces 404 for missing resources.
         """
-        self._extract_admin_context(auth_context)
-
-        user = await self.user_repo.get_by_id(user_id)
+        tenant_id, _, _ = self._extract_admin_context(auth_context)
+        from app.models.user import User
+        user = (await self.db.execute(select(User).where(User.id == user_id,
+                self.user_repo.tenant_membership(tenant_id)))).scalar_one_or_none()
         if not user:
             raise NotFoundException(f"User '{user_id}' not found.", code="USER_NOT_FOUND")
 
         # Query hosted meetings count
-        count_query = select(func.count(Meeting.id)).where(Meeting.host_id == user.id)
+        count_query = select(func.count(Meeting.id)).where(Meeting.host_id == user.id, Meeting.tenant_id == tenant_id)
         count_result = await self.db.execute(count_query)
         hosted_count = count_result.scalar() or 0
 

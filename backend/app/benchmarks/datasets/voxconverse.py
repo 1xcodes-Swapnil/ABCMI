@@ -210,78 +210,29 @@ class VoxConverseDatasetAdapter(BaseDatasetAdapter):
                     })
         return turns
 
-    def locate_or_download_samples(
-        self,
-        target_dir: str,
-        max_samples: int = 5,
-        language: str = "en",
-        split: str = "test",
-    ) -> List[BenchmarkSample]:
-        """Load VoxConverse evaluation samples and fetch official RTTMs from Oxford VGG."""
-        vox_dir = os.getenv("VOXCONVERSE_DATASET_ROOT") or os.path.join(target_dir, "voxconverse")
-        os.makedirs(vox_dir, exist_ok=True)
-        samples: List[BenchmarkSample] = []
-
-        sample_keys = list(self.OFFICIAL_SAMPLES.keys())[:max_samples]
-        for s_key in sample_keys:
-            meta = self.OFFICIAL_SAMPLES[s_key]
-            audio_path = os.path.join(vox_dir, f"{s_key}.wav")
-            rttm_path = os.path.join(vox_dir, f"{s_key}.rttm")
-
-            # 1. Fetch official RTTM ground truth from Oxford VGG GitHub
-            if not os.path.exists(rttm_path):
-                try:
-                    req = urllib.request.Request(
-                        meta["rttm_url"],
-                        headers={"User-Agent": "Mozilla/5.0 (ABCI-MI Benchmark Framework/1.0)"},
-                    )
-                    with urllib.request.urlopen(req, timeout=15) as resp, open(rttm_path, "wb") as out_f:
-                        out_f.write(resp.read())
-                except Exception as dl_err:
-                    pass
-
-            # 2. Check audio existence
-            if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
-                # If audio is missing, raise explicit MissingAudioError with guidance
-                raise MissingAudioError(
-                    dataset_name="VoxConverse",
-                    sample_id=s_key,
-                    expected_path=audio_path,
-                )
-
-            # 3. Parse ground truth RTTM
-            turns = self._parse_rttm_file(rttm_path)
+    def locate_or_download_samples(self, target_dir: str, max_samples: int = 5,
+                                   language: str = "en", split: str = "test") -> List[BenchmarkSample]:
+        """Pair actual local recordings and non-empty RTTM files without downloads."""
+        from pathlib import Path
+        import soundfile as sf
+        root = Path(os.getenv("VOXCONVERSE_DATASET_ROOT") or os.path.join(target_dir, "voxconverse"))
+        audio_files = sorted(root.rglob("*.wav"), key=lambda p: (sf.info(p).duration, p.name))[:max_samples]
+        if not audio_files:
+            raise MissingAudioError(dataset_name=self.name, sample_id="local", expected_path=str(root))
+        samples = []
+        for audio in audio_files:
+            matches = sorted(root.rglob(audio.stem + ".rttm"))
+            rttm = next((p for p in matches if p.stat().st_size > 0), None)
+            if rttm is None:
+                raise MissingAnnotationsError(dataset_name=self.name, sample_id=audio.stem, expected_file="Non-empty matched RTTM")
+            turns = self._parse_rttm_file(str(rttm))
             if not turns:
-                raise MissingAnnotationsError(
-                    dataset_name="VoxConverse",
-                    sample_id=s_key,
-                    expected_file=rttm_path,
-                )
-
-            duration = meta["duration"]
-            if os.path.exists(audio_path):
-                info = self.inspect_audio_file(audio_path)
-                if info.get("is_valid_wave") and info.get("duration_seconds", 0) > 0:
-                    duration = info["duration_seconds"]
-
-            sample = BenchmarkSample(
-                sample_id=s_key,
-                dataset_name=self.name,
-                dataset_version=self.version,
-                audio_path=audio_path,
-                audio_format="wav",
-                duration_seconds=duration,
-                language="en",
-                reference_transcript=None,  # VoxConverse is diarization-focused
-                reference_speaker_turns=turns,
-                reference_segments=[
-                    {"start_time": t["start_time"], "end_time": t["end_time"], "speaker": t["speaker"]}
-                    for t in turns
-                ],
-                ground_truth_status="ground_truth_available",
-                metadata={"num_speakers": meta["num_speakers"], "split": meta["split"]},
-            )
+                raise MissingAnnotationsError(dataset_name=self.name, sample_id=audio.stem, expected_file=str(rttm))
+            info = sf.info(audio)
+            sample = BenchmarkSample(sample_id=audio.stem, dataset_name=self.name, dataset_version=self.version,
+                audio_path=str(audio), audio_format="wav", duration_seconds=info.duration, language=language,
+                reference_speaker_turns=turns, ground_truth_status="ground_truth_available",
+                metadata={"rttm_source": str(rttm), "split": split, "language_verification": "NOT VERIFIED"})
             sample.compute_sha256()
             samples.append(sample)
-
         return samples

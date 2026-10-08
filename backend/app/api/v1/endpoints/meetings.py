@@ -100,6 +100,8 @@ def _to_meeting_response(meeting: Any) -> MeetingResponse:
         scheduled_start=meeting.scheduled_start,
         actual_start=meeting.actual_start,
         actual_end=meeting.actual_end,
+        duration_minutes=meeting.duration_minutes,
+        timezone=meeting.timezone,
         settings=meeting.settings or {},
         audio_recordings=audio_list,
         participants=participant_list,
@@ -203,13 +205,14 @@ async def upload_meeting_audio(
     Upload and register audio recording payloads for meeting transcription and AI pipeline ingestion.
     """
     service = MeetingService(db)
-    content = await file.read()
+    # UploadFile is already spooled to disk; don't materialize a multi-hour file.
+    await file.seek(0)
     file_name = file.filename or "meeting_audio.wav"
 
     audio = await service.upload_audio(
         meeting_id=meeting_id,
         file_name=file_name,
-        content=content,
+        content=file.file,
         format=format,
         sample_rate=sample_rate,
         channels=channels,
@@ -219,7 +222,7 @@ async def upload_meeting_audio(
     await _emit_lifecycle_event(
         meeting_id=meeting_id,
         event_type="audio_uploaded",
-        payload={"audio_id": str(audio.id), "file_name": file_name, "size_bytes": len(content)},
+        payload={"audio_id": str(audio.id), "file_name": file_name, "size_bytes": audio.file_size_bytes},
     )
 
     return AudioResponse(
@@ -355,6 +358,16 @@ async def delete_meeting(
     if auth_context.get("role") != "admin" and str(meeting.host_id or "") != str(auth_context.get("user_id", "")):
         raise ForbiddenException(message="Only meeting host or admin can delete a meeting", code="FORBIDDEN")
 
+    from sqlalchemy import select, delete
+    from app.models.inference_job import InferenceJob
+    from app.models.live_session import LiveSession
+    active = await db.scalar(select(InferenceJob.id).where(InferenceJob.meeting_id == meeting_id,
+        InferenceJob.status.in_(["queued", "running"])).limit(1))
+    if active:
+        raise HTTPException(409, "Finish inference or cancel the queued job before deleting this meeting")
+    await db.execute(delete(InferenceJob).where(InferenceJob.meeting_id == meeting_id))
+    await db.execute(delete(LiveSession).where(LiveSession.meeting_id == meeting_id))
+
     await db.delete(meeting)
     await db.commit()
 
@@ -402,10 +415,10 @@ async def get_meeting_analytics(
         return {
             "meeting_id": str(meeting.id),
             "speaking_time_distribution": {},
-            "collaboration_score": 0.0,
-            "participation_index": 0.0,
-            "sentiment_score": 0.0,
-            "productivity_score": 0.0,
+            "collaboration_score": None,
+            "participation_index": None,
+            "sentiment_score": None,
+            "productivity_score": None,
             "topic_keywords": [],
             "summary_metrics": {},
         }

@@ -1,10 +1,10 @@
 # ==============================================================================
 # ABCI-MI Backend Production Dockerfile
-# Multi-stage Python 3.10 Build
+# Multi-stage Python 3.11 Build
 # ==============================================================================
 
 # Build Stage
-FROM python:3.10-slim AS builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
@@ -18,7 +18,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
 # Final Runtime Stage
-FROM python:3.10-slim AS runner
+FROM python:3.11-slim AS runner
 
 WORKDIR /app
 

@@ -4,6 +4,8 @@ FastAPI Main Application Entry Point
 """
 
 from contextlib import asynccontextmanager
+import asyncio
+from contextlib import suppress
 from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,7 +62,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     logger.info("ABCI-MI Backend startup complete. Ready to receive requests.")
 
-    yield
+    from app.services.notification_listener import listen_for_notifications
+    listener = asyncio.create_task(listen_for_notifications(), name="notification-listener")
+    try:
+        yield
+    finally:
+        listener.cancel()
+        with suppress(asyncio.CancelledError):
+            await listener
 
     # Shutdown sequence
     logger.info("Initiating ABCI-MI Backend graceful shutdown...")

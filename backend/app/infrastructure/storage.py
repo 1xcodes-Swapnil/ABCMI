@@ -4,6 +4,8 @@ Provides filesystem and object storage abstraction for meeting audio files, tran
 """
 
 from pathlib import Path
+import io
+import uuid
 from typing import Any, Dict, Optional
 
 from app.core.config import get_settings
@@ -32,13 +34,29 @@ class LocalStorageManager:
         except Exception as e:
             logger.error(f"Failed to create storage directory {self.base_path}: {e}")
 
-    def save_audio_file(self, meeting_id: Any, file_name: str, content: bytes) -> Path:
-        """Saves uploaded audio payload bytes into local storage directory."""
+    def save_audio_file(self, meeting_id: Any, file_name: str, content) -> Path:
+        """Copy bytes or a seekable upload stream with bounded memory and size."""
         raw_dir = self.base_path / "raw"
         raw_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = f"{meeting_id}_{file_name}"
+        file_name = Path(file_name.replace('\\', '/')).name
+        safe_name = f"{meeting_id}_{uuid.uuid4().hex}_{file_name}"
         target_path = raw_dir / safe_name
-        target_path.write_bytes(content)
+        source = io.BytesIO(content) if isinstance(content, bytes) else content
+        source.seek(0)
+        limit = get_settings().MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        size = 0
+        try:
+            with target_path.open('xb') as destination:
+                while data := source.read(1024 * 1024):
+                    size += len(data)
+                    if size > limit:
+                        raise ValueError(f"Audio exceeds configured upload limit ({get_settings().MAX_UPLOAD_SIZE_MB} MiB)")
+                    destination.write(data)
+            if not size:
+                raise ValueError("Audio upload is empty")
+        except Exception:
+            target_path.unlink(missing_ok=True)
+            raise
         return target_path
 
     async def save_audio_chunk(self, meeting_id: str, session_id: str, sequence_number: int, file_bytes: bytes) -> str:

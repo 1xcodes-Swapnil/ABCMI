@@ -7,14 +7,18 @@ Redis event publishing, and incremental processing adapter boundaries.
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 import uuid
-from sqlalchemy import select
+import hashlib
+import io
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
+from app.core.exceptions import AppException, BadRequestException, ForbiddenException, NotFoundException
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.events.redis_bus import RedisEventBus
 from app.infrastructure.storage import get_storage_manager
 from app.models.live_session import LiveSession, LiveAudioChunk
+from app.models.inference_job import InferenceJob
 from app.models.meeting import Meeting
 from app.repositories.meeting_repo import MeetingRepository
 
@@ -31,27 +35,6 @@ LIVE_VALID_TRANSITIONS: Dict[str, Set[str]] = {
 }
 
 
-class StreamingProcessingProvider:
-    """
-    Interface / Adapter for incremental audio processing in live sessions.
-    Operates in mock/fixture mode for Phase 4.17 without real GPU/Whisper inference.
-    """
-
-    async def process_chunk(self, session: LiveSession, chunk: LiveAudioChunk) -> Dict[str, Any]:
-        logger.info(
-            "StreamingProcessingProvider processing chunk %d for session %s (meeting %s)",
-            chunk.sequence_number,
-            session.id,
-            session.meeting_id,
-        )
-        return {
-            "status": "processed_fixture",
-            "session_id": str(session.id),
-            "sequence_number": chunk.sequence_number,
-            "transcript_snippet": f"[Fixture live transcript for chunk {chunk.sequence_number}]",
-        }
-
-
 class LiveSessionService:
     """Service handling live session lifecycle and streaming audio chunk ingestion."""
 
@@ -60,7 +43,6 @@ class LiveSessionService:
         self.meeting_repo = MeetingRepository(db)
         self.event_bus = RedisEventBus()
         self.storage = get_storage_manager()
-        self.processor = StreamingProcessingProvider()
 
     def validate_transition(self, current_state: str, new_state: str) -> None:
         allowed = LIVE_VALID_TRANSITIONS.get(current_state, set())
@@ -77,12 +59,16 @@ class LiveSessionService:
         
         role = auth_context.get("role")
         user_id_str = auth_context.get("user_id")
-        if role != "admin" and meeting.host_id and user_id_str and str(meeting.host_id) != str(user_id_str):
+        if not user_id_str or not auth_context.get("tenant_id") or str(meeting.tenant_id) != str(auth_context["tenant_id"]):
+            raise ForbiddenException(message="Live session tenant does not match authenticated identity")
+        if role != "admin" and (not meeting.host_id or str(meeting.host_id) != str(user_id_str)):
             raise ForbiddenException(message="Only meeting host or admin can manage live sessions", code="FORBIDDEN")
         return meeting
 
     async def get_or_create_session(self, meeting_id: uuid.UUID, auth_context: Dict[str, Any], language: str = "en", session_metadata: Optional[dict] = None) -> LiveSession:
-        await self._verify_meeting_access(meeting_id, auth_context)
+        meeting = await self._verify_meeting_access(meeting_id, auth_context)
+        # Serialize session creation and ingestion for this meeting.
+        await self.db.execute(select(Meeting.id).where(Meeting.id == meeting_id).with_for_update())
         
         stmt = select(LiveSession).where(LiveSession.meeting_id == meeting_id)
         result = await self.db.execute(stmt)
@@ -91,9 +77,12 @@ class LiveSessionService:
         if not session:
             session = LiveSession(
                 meeting_id=meeting_id,
+                tenant_id=meeting.tenant_id,
                 status="created",
                 language=language,
-                session_metadata=session_metadata or {},
+                session_metadata={**(session_metadata or {}), "authorized_actor": {
+                    "user_id": auth_context["user_id"], "tenant_id": auth_context["tenant_id"],
+                    "role": auth_context.get("role", "member")}},
                 correlation_id=auth_context.get("correlation_id") or str(uuid.uuid4()),
                 request_id=auth_context.get("request_id") or str(uuid.uuid4()),
             )
@@ -103,6 +92,11 @@ class LiveSessionService:
         return session
 
     async def start_session(self, meeting_id: uuid.UUID, auth_context: Dict[str, Any], language: str = "en", session_metadata: Optional[dict] = None) -> LiveSession:
+        settings = get_settings()
+        if settings.EXECUTION_MODE.upper() != "REAL":
+            raise BadRequestException(message="Live ingestion requires EXECUTION_MODE=REAL")
+        if not 0 < settings.LIVE_OVERLAP_SECONDS < settings.LIVE_CHUNK_SECONDS:
+            raise BadRequestException(message="Live overlap must be positive and smaller than the chunk duration")
         session = await self.get_or_create_session(meeting_id, auth_context, language, session_metadata)
         self.validate_transition(session.status, "live")
 
@@ -171,16 +165,15 @@ class LiveSessionService:
 
     async def stop_session(self, meeting_id: uuid.UUID, auth_context: Dict[str, Any]) -> LiveSession:
         session = await self.get_or_create_session(meeting_id, auth_context)
-        if session.status in {"completed", "stopped"}:
+        if session.status in {"completed", "stopping"}:
             return session
         self.validate_transition(session.status, "stopping")
 
         session.status = "stopping"
-        await self.db.commit()
-
-        session.status = "completed"
         session.stopped_at = datetime.now(timezone.utc)
         session.last_activity_at = datetime.now(timezone.utc)
+        self.db.add(InferenceJob(job_key=f"finalize:{session.id}", kind="finalize",
+            meeting_id=meeting_id, session_id=session.id, status="queued"))
         await self.db.commit()
         await self.db.refresh(session)
 
@@ -209,6 +202,19 @@ class LiveSessionService:
         checksum: Optional[str] = None,
     ) -> Tuple[LiveAudioChunk, str]:
         session = await self.get_or_create_session(meeting_id, auth_context)
+        await self.db.refresh(session, with_for_update=True)
+        settings = get_settings()
+        if settings.EXECUTION_MODE.upper() != "REAL":
+            raise BadRequestException(message="Live ingestion requires EXECUTION_MODE=REAL")
+        digest = hashlib.sha256(file_bytes).hexdigest()
+        previous = (await self.db.execute(select(LiveAudioChunk).where(
+            LiveAudioChunk.session_id == session.id,
+            LiveAudioChunk.sequence_number == sequence_number))).scalar_one_or_none()
+        if previous:
+            if (previous.checksum == digest and previous.timestamp_start_ms == timestamp_start_ms
+                    and previous.timestamp_end_ms == timestamp_end_ms):
+                return previous, previous.status
+            raise BadRequestException(message="Sequence already exists with different audio or timestamps")
         if session.status != "live":
             raise BadRequestException(
                 message=f"Cannot ingest audio chunk while live session status is '{session.status}'",
@@ -217,6 +223,37 @@ class LiveSessionService:
 
         session.received_chunks_count += 1
         session.last_activity_at = datetime.now(timezone.utc)
+
+        if not file_bytes or len(file_bytes) > settings.LIVE_MAX_CHUNK_BYTES:
+            raise BadRequestException(message="Live chunk is empty or exceeds the configured byte limit")
+        if checksum and checksum.lower() != digest:
+            raise BadRequestException(message="Live chunk SHA-256 mismatch")
+        try:
+            import soundfile as sf
+            info = sf.info(io.BytesIO(file_bytes))
+        except Exception as exc:
+            raise BadRequestException(message="Live chunks must contain decodable PCM WAV audio") from exc
+        if info.format != "WAV" or info.channels != 1 or info.frames <= 0:
+            raise BadRequestException(message="Live chunks require non-empty mono WAV audio")
+        if timestamp_start_ms < 0 or timestamp_end_ms <= timestamp_start_ms:
+            raise BadRequestException(message="Invalid live chunk time interval")
+        if abs(info.duration * 1000 - (timestamp_end_ms - timestamp_start_ms)) > 2:
+            raise BadRequestException(message="Audio duration does not match chunk timestamps")
+        if info.duration > settings.LIVE_CHUNK_SECONDS + .002:
+            raise BadRequestException(message="Live chunk exceeds the configured inference window")
+        last = (await self.db.execute(select(LiveAudioChunk).where(
+            LiveAudioChunk.session_id == session.id).order_by(LiveAudioChunk.sequence_number.desc()).limit(1))).scalar_one_or_none()
+        if last:
+            expected = last.timestamp_end_ms - round(settings.LIVE_OVERLAP_SECONDS * 1000)
+            if abs(timestamp_start_ms - expected) > 2 or timestamp_end_ms <= last.timestamp_end_ms:
+                raise BadRequestException(message="Chunk coverage/overlap is inconsistent with the preceding chunk")
+        elif timestamp_start_ms != 0:
+            raise BadRequestException(message="First live chunk must start at zero")
+        pending = await self.db.scalar(select(func.count()).select_from(InferenceJob).where(
+            InferenceJob.session_id == session.id, InferenceJob.kind == "chunk",
+            InferenceJob.status.in_(["queued", "running"])))
+        if pending >= settings.LIVE_MAX_PENDING_CHUNKS:
+            raise AppException(message="Inference backlog is full; retain and retry this chunk", code="LIVE_BACKPRESSURE", status_code=429)
 
         await self.event_bus.publish(
             f"events:meetings:{meeting_id}:live",
@@ -229,7 +266,7 @@ class LiveSessionService:
         )
 
         # Validate sequence ordering
-        if sequence_number <= session.latest_sequence_number:
+        if sequence_number != session.latest_sequence_number + 1:
             session.rejected_chunks_count += 1
             await self.db.commit()
             await self.event_bus.publish(
@@ -262,10 +299,13 @@ class LiveSessionService:
             timestamp_end_ms=timestamp_end_ms,
             file_path=stored_path,
             file_size=len(file_bytes),
-            checksum=checksum,
-            status="accepted",
+            checksum=digest,
+            status="queued",
         )
         self.db.add(chunk)
+        await self.db.flush()
+        self.db.add(InferenceJob(job_key=f"chunk:{chunk.id}", kind="chunk",
+            meeting_id=meeting_id, session_id=session.id, chunk_id=chunk.id, status="queued"))
 
         session.accepted_chunks_count += 1
         session.latest_sequence_number = sequence_number
@@ -283,16 +323,30 @@ class LiveSessionService:
             },
         )
 
-        # Trigger incremental processing adapter
-        processing_result = await self.processor.process_chunk(session, chunk)
-
-        return chunk, processing_result.get("status", "processed")
+        return chunk, "queued"
 
     async def get_session_status(self, meeting_id: uuid.UUID, auth_context: Dict[str, Any]) -> Dict[str, Any]:
         session = await self.get_or_create_session(meeting_id, auth_context)
-        recent_chunks = session.chunks[-20:] if session.chunks else []
+        recent_chunks = (await self.db.execute(select(LiveAudioChunk).where(
+            LiveAudioChunk.session_id == session.id).order_by(LiveAudioChunk.sequence_number.desc()).limit(20))).scalars().all()
+        jobs = list(reversed((await self.db.execute(select(InferenceJob).where(InferenceJob.session_id == session.id)
+            .order_by(InferenceJob.created_at.desc()).limit(50))).scalars().all()))
+        counts = dict((await self.db.execute(select(InferenceJob.status, func.count()).where(
+            InferenceJob.session_id == session.id).group_by(InferenceJob.status))).all())
+        pending = counts.get("queued", 0) + counts.get("running", 0)
+        failed = counts.get("failed", 0)
         return {
             "session": session,
             "recent_chunks": recent_chunks,
-            "processing_state": "active_fixture",
+            "processing_state": "failed" if failed else "processing" if pending else session.status,
+            "pending_jobs": pending,
+            "failed_jobs": failed,
+            "jobs": [{"id": str(job.id), "chunk_id": str(job.chunk_id) if job.chunk_id else None,
+                "kind": job.kind, "status": job.status,
+                "result": {k: v for k, v in (job.result or {}).items() if k in {
+                    "segments", "elapsed_seconds", "rtf", "speaker_scope", "canonical_transcript_id", "final_segments"}},
+                "error": job.error,
+                "created_at": job.created_at, "started_at": job.started_at, "finished_at": job.finished_at} for job in jobs],
+            "chunk_seconds": get_settings().LIVE_CHUNK_SECONDS,
+            "overlap_seconds": get_settings().LIVE_OVERLAP_SECONDS,
         }

@@ -183,8 +183,8 @@ class TranscriptIntelligenceEngine:
             overall_confidence=overall_conf,
             metadata={
                 "correlation_id": correlation_id,
-                "model_name": asr_result.metadata.get("model_name", "openai/whisper-large-v3"),
-                "model_version": asr_result.metadata.get("model_version", "v3-turbo"),
+                "model_name": asr_result.metadata.get("model_name"),
+                "model_version": asr_result.metadata.get("model_version"),
                 "provenance": f"TranscriptIntelligence:{asr_result.metadata.get('provenance', 'ASR')}",
             },
         )

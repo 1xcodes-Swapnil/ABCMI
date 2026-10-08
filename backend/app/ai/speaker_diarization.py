@@ -64,12 +64,13 @@ class SpeakerDiarizationEngine:
         meeting_id: uuid.UUID,
         expected_speakers: Optional[int] = None,
         correlation_id: Optional[str] = None,
+        audio_file_path: Optional[str] = None,
     ) -> DiarizationResult:
         """
         Segments audio into speaker turns and extracts speaker voiceprints.
         Supports REAL mode with PyAnnote and FIXTURE/MOCK modes.
         """
-        if not audio_payload:
+        if not audio_payload and not audio_file_path:
             raise ValueError("Audio payload cannot be empty.")
 
         settings = get_settings()
@@ -78,9 +79,12 @@ class SpeakerDiarizationEngine:
         if exec_mode == "REAL":
             # 1. Run real PyAnnote diarization
             # Save audio payload to a temporary file
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp.write(audio_payload)
-                tmp_path = tmp.name
+            owns_temp_file = audio_file_path is None
+            tmp_path = audio_file_path
+            if owns_temp_file:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    tmp.write(audio_payload)
+                    tmp_path = tmp.name
 
             try:
                 # 2. Local audio validation on the temp file
@@ -183,7 +187,7 @@ class SpeakerDiarizationEngine:
                     raise RuntimeError(f"PyAnnote diarization inference failed: {ex}") from ex
 
             finally:
-                if os.path.exists(tmp_path):
+                if owns_temp_file and os.path.exists(tmp_path):
                     try:
                         os.remove(tmp_path)
                     except Exception:

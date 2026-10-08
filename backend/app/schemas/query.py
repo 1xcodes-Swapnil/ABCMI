@@ -225,8 +225,8 @@ class QueryResponse(TimestampSchema):
         ...,
         description="Answer status: 'answered', 'insufficient_context', 'requires_verification', etc.",
     )
-    confidence: float = Field(
-        ...,
+    confidence: Optional[float] = Field(
+        default=None,
         ge=0.0,
         le=1.0,
         description="Overall confidence score in the synthesized answer",

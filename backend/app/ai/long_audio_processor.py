@@ -114,8 +114,8 @@ class LongAudioProcessor:
             if overlap_duration is not None
             else getattr(settings, "AUDIO_CHUNK_OVERLAP_SECONDS", 30.0)
         )
-        if self.overlap_duration >= self.chunk_duration:
-            raise ValueError("Overlap duration must be strictly less than chunk duration.")
+        if self.chunk_duration <= 0 or not 0 < self.overlap_duration < self.chunk_duration:
+            raise ValueError("Require chunk duration > 0 and 0 < overlap < chunk duration.")
 
         self.concurrency = int(
             concurrency
@@ -457,6 +457,7 @@ class LongAudioProcessor:
              and transition to chunk_k for segments after.
           5. Filter out near-identical repeated segments that overlap chronologically.
         """
+        self.last_dedup_decisions = []
         if not reconciled_chunks:
             return [], 0
 
@@ -507,6 +508,9 @@ class LongAudioProcessor:
                     )
                     if has_match:
                         dedup_count += 1
+                        self.last_dedup_decisions.append({"segment_id": str(seg.segment_id),
+                            "chunk_index": idx - 1, "decision": "removed_text_duplicate",
+                            "start_time": seg.start_time, "end_time": seg.end_time})
                     else:
                         kept_prev.append(seg)
 
@@ -524,10 +528,20 @@ class LongAudioProcessor:
                             if self._text_similarity(prev_s.transcript, seg.transcript) > 0.6:
                                 is_duplicate = True
                                 dedup_count += 1
+                                self.last_dedup_decisions.append({"segment_id": str(seg.segment_id),
+                                    "chunk_index": idx, "decision": "removed_text_duplicate",
+                                    "matched_segment_id": str(prev_s.segment_id),
+                                    "start_time": seg.start_time, "end_time": seg.end_time})
                                 break
                     if not is_duplicate and seg.start_time >= (last_kept_time - 0.2):
                         kept_curr.append(seg)
                         last_kept_time = max(last_kept_time, seg.end_time)
+                    elif not is_duplicate:
+                        self.last_dedup_decisions.append({"segment_id": str(seg.segment_id),
+                            "chunk_index": idx, "decision": "excluded_by_overlap_boundary",
+                            "start_time": seg.start_time, "end_time": seg.end_time,
+                            "previous_end_time": last_kept_time,
+                            "duplicate_verified": False})
                 else:
                     # Beyond overlap region: unconditionally keep
                     kept_curr.append(seg)
@@ -578,12 +592,29 @@ class LongAudioProcessor:
             digest = hasher.hexdigest()
             checkpoints = sorted(history.glob("state_*.json")) if history.exists() else []
             if not initial_state and checkpoints:
-                initial_state = ChunkProcessingState.model_validate_json(checkpoints[-1].read_text())
+                initial_state = ChunkProcessingState.model_validate_json(checkpoints[-1].read_text(encoding="utf-8"))
             if initial_state and (initial_state.audio_sha256 != digest or
                 initial_state.chunk_duration_seconds != self.chunk_duration or
                 initial_state.overlap_duration_seconds != self.overlap_duration or
                 initial_state.model_id != settings.OPENMOSS_MODEL_ID):
                 raise RuntimeError("Saved chunk checkpoint differs from actual audio/model/configuration; refusing stale resume")
+            if initial_state:
+                # A crash can occur after a transcript journal is committed but
+                # before its manifest. Recover that actual output without inference.
+                for chunk in initial_state.chunks:
+                    key = str(chunk.chunk_id)
+                    journal = history / f"segments_{key}.json"
+                    if key not in initial_state.chunk_segments and journal.is_file():
+                        initial_state.chunk_segments[key] = [ASRSegment.model_validate(row)
+                            for row in json.loads(journal.read_text(encoding="utf-8"))]
+                    if key in initial_state.chunk_segments:
+                        chunk.status = "completed"
+                    elif chunk.status == "completed":
+                        raise RuntimeError("Completed chunk has no durable transcript journal")
+                initial_state.completed_chunks_count = sum(c.status == "completed" for c in initial_state.chunks)
+                if checkpoints:
+                    initial_state.checkpoint_version = max(initial_state.checkpoint_version,
+                        int(checkpoints[-1].stem.removeprefix("state_")))
 
         # 1. State initialization or resumption
         if initial_state and initial_state.chunks:
@@ -607,10 +638,18 @@ class LongAudioProcessor:
         def save_state():
             if history:
                 history.mkdir(parents=True, exist_ok=True)
+                for key, segments in state.chunk_segments.items():
+                    journal = history / f"segments_{key}.json"
+                    if not journal.exists():
+                        temporary = journal.with_name(f"{journal.stem}_{uuid.uuid4().hex}.tmp")
+                        temporary.write_text(json.dumps([s.model_dump(mode="json") for s in segments]), encoding="utf-8")
+                        temporary.replace(journal)
                 state.checkpoint_version += 1
                 target = history / f"state_{state.checkpoint_version:08d}.json"
-                with target.open("x", encoding="utf-8") as output:
-                    output.write(state.model_dump_json(indent=2))
+                temporary = target.with_name(f"{target.stem}_{uuid.uuid4().hex}.tmp")
+                with temporary.open("x", encoding="utf-8") as output:
+                    output.write(state.model_dump_json(indent=2, exclude={"chunk_segments"}))
+                temporary.replace(target)
         save_state()
 
         # Emit initial processing event

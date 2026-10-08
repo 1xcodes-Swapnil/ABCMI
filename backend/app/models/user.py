@@ -25,6 +25,8 @@ class User(BaseModel):
     role: Mapped[str] = mapped_column(String(50), nullable=False, default="member")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="active", index=True)
     preferences: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, default=dict)
+    password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    login_tenant_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     @property
     def is_active(self) -> bool:

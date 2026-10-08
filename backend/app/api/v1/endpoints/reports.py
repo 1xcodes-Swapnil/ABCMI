@@ -43,16 +43,8 @@ async def generate_meeting_report(
         auth_context=auth_context,
     )
     
-    # Transform ORM model to response DTO with sections
+    # Only expose sections actually persisted by report generation.
     sections = []
-    if report.provenance and "sections" in report.provenance:
-        # If stored in provenance or build sections from report
-        pass
-    
-    # Build default sections representation
-    sections = [
-        {"title": "Report Summary", "content": f"Meeting Report generated for {meeting_id}", "confidence": 1.0, "verification_status": "verified"}
-    ]
     if report.provenance and isinstance(report.provenance, dict) and "sections" in report.provenance:
         sections = report.provenance["sections"]
 
@@ -86,7 +78,7 @@ async def list_meeting_reports(
     
     response_list = []
     for report in reports:
-        sections = [{"title": "Report Summary", "content": f"Meeting Report for {meeting_id}", "confidence": 1.0, "verification_status": "verified"}]
+        sections = []
         if report.provenance and isinstance(report.provenance, dict) and "sections" in report.provenance:
             sections = report.provenance["sections"]
 
@@ -121,7 +113,7 @@ async def get_report_details(
     service = ReportGenerationService(db)
     report = await service.get_report(report_id, auth_context)
 
-    sections = [{"title": "Report Summary", "content": f"Meeting Report for {report.meeting_id}", "confidence": 1.0, "verification_status": "verified"}]
+    sections = []
     if report.provenance and isinstance(report.provenance, dict) and "sections" in report.provenance:
         sections = report.provenance["sections"]
 
@@ -194,6 +186,7 @@ async def download_report_file(
         "md": "text/markdown",
         "txt": "text/plain",
         "pdf": "application/pdf",
+        "html": "text/html; charset=utf-8",
     }
     media_type = content_types.get(target_format.lower(), "application/octet-stream")
     filename = f"report_{report.meeting_id}_{report_id}.{target_format}"

@@ -266,6 +266,8 @@ def final_report(run):
     result={'STATUS':status,'gates':gates,'AUDIO':info,'CHUNKS':chunks,'MOSS':{'calls':len(moss),'failed':sum(c.get('status')=='FAILED' for c in moss)},
         'SARVAM':'actual per-turn generation recorded' if sarvam else 'NOT VERIFIED',
         'PYANNOTE':pyannote.get('status','NOT VERIFIED'),'POSTGRESQL':read.get('status','NOT VERIFIED'),
+        'OVERLAP_RESOLUTION':cli.get('overlap_resolution',{}),
+        'QUALITY_WARNINGS':cli.get('quality_warnings',[]),
         'FRESH_READ_BACK':read.get('status','NOT VERIFIED'),'REDIS':'AVAILABLE' if gates['redis_distributed'] else ('FALLBACK' if events else 'NOT VERIFIED'),
         'QDRANT':'VERIFIED' if gates['qdrant'] else 'NOT VERIFIED','PROCESSING_TIME':elapsed or 'NOT AVAILABLE',
         'RTF':elapsed/info['audio_duration'] if isinstance(elapsed,(int,float)) and info.get('audio_duration') else 'NOT AVAILABLE',

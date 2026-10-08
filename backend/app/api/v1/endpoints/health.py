@@ -166,90 +166,25 @@ async def get_system_metrics() -> JSONResponse:
     settings = get_settings()
     uptime = round(time.time() - _START_TIME, 2)
 
-    # 1. Memory Stats
-    mem_info = {"total_mb": 4096.0, "used_mb": 1024.0, "free_mb": 3072.0, "percent": 25.0}
+    memory = {"total_mb": None, "used_mb": None, "free_mb": None, "percent": None, "process_rss_mb": None}
+    cpu = {"total_percent": None, "cores": os.cpu_count(), "load_averages": None}
     try:
-        if os.path.exists("/proc/meminfo"):
-            mem_raw = {}
-            with open("/proc/meminfo", "r") as f:
-                for line in f:
-                    parts = line.split(":")
-                    if len(parts) == 2:
-                        mem_raw[parts[0].strip()] = parts[1].strip().split()[0]
-            total_kb = float(mem_raw.get("MemTotal", 4194304))
-            avail_kb = float(mem_raw.get("MemAvailable", mem_raw.get("MemFree", 2097152)))
-            used_kb = max(0.0, total_kb - avail_kb)
-            mem_info = {
-                "total_mb": round(total_kb / 1024.0, 1),
-                "used_mb": round(used_kb / 1024.0, 1),
-                "free_mb": round(avail_kb / 1024.0, 1),
-                "percent": round((used_kb / total_kb) * 100.0, 1) if total_kb > 0 else 25.0,
-            }
-    except Exception:
+        import psutil
+        measured = psutil.virtual_memory()
+        memory = {"total_mb": measured.total / 1048576, "used_mb": measured.used / 1048576,
+                  "free_mb": measured.available / 1048576, "percent": measured.percent,
+                  "process_rss_mb": psutil.Process().memory_info().rss / 1048576}
+        cpu["total_percent"] = await asyncio.to_thread(psutil.cpu_percent, 0.1)
+        if hasattr(os, "getloadavg"):
+            cpu["load_averages"] = list(os.getloadavg())
+    except (ImportError, OSError):
         pass
-
-    # 2. Process RSS
-    try:
-        if _HAS_RESOURCE:
-            rusage = resource.getrusage(resource.RUSAGE_SELF)
-            mem_info["process_rss_mb"] = round(rusage.ru_maxrss / 1024.0, 1)
-        else:
-            import psutil
-            mem_info["process_rss_mb"] = round(psutil.Process().memory_info().rss / 1024 / 1024, 1)
-    except Exception:
-        mem_info["process_rss_mb"] = 256.0
-
-    # 3. CPU Load Averages
-    load_avg = [0.15, 0.22, 0.18]
-    if hasattr(os, "getloadavg"):
-        try:
-            load_avg = [round(x, 2) for x in os.getloadavg()]
-        except Exception:
-            pass
-
-    cores = os.cpu_count() or 4
-    estimated_cpu_percent = min(100.0, max(5.0, round((load_avg[0] / max(1, cores)) * 100.0, 1)))
-
-    # 4. Probe Subsystem Latencies concurrently
-    db_task = asyncio.create_task(check_database_health())
-    redis_task = asyncio.create_task(check_redis_health())
-    qdrant_task = asyncio.create_task(check_qdrant_health())
-
-    results = await asyncio.gather(db_task, redis_task, qdrant_task, return_exceptions=True)
-    db_res = results[0] if not isinstance(results[0], Exception) else {}
-    redis_res = results[1] if not isinstance(results[1], Exception) else {}
-    qdrant_res = results[2] if not isinstance(results[2], Exception) else {}
-
-    subsystem_latencies = {
-        "database_ms": db_res.get("latency_ms") or 2.1,
-        "redis_ms": redis_res.get("latency_ms") or 0.8,
-        "qdrant_ms": qdrant_res.get("latency_ms") or 5.4,
-        "api_gateway_p95_ms": 24.5,
-        "audio_stream_chunk_ms": 14.8,
-    }
-
-    return JSONResponse(
-        status_code=status.HTTP_200_OK,
-        content={
-            "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat(),
-            "uptime_seconds": uptime,
-            "node_environment": settings.ENVIRONMENT,
-            "cpu": {
-                "total_percent": estimated_cpu_percent,
-                "cores": cores,
-                "load_averages": load_avg,
-            },
-            "memory": mem_info,
-            "subsystem_latencies": subsystem_latencies,
-            "subsystems_status": {
-                "fastapi": "healthy",
-                "database": db_res.get("status", "healthy"),
-                "redis": redis_res.get("status", "healthy"),
-                "qdrant": qdrant_res.get("status", "healthy"),
-                "asr_worker": "healthy",
-                "diarization": "healthy",
-            },
-        },
-    )
-
+    results = await asyncio.gather(check_database_health(), check_redis_health(), check_qdrant_health(), return_exceptions=True)
+    statuses, latencies = {"fastapi": "healthy", "asr_worker": "not measured", "diarization": "not measured"}, {}
+    for name, result in zip(("database", "redis", "qdrant"), results):
+        statuses[name] = result.get("status", "unknown") if isinstance(result, dict) else "unhealthy"
+        latencies[name + "_ms"] = result.get("latency_ms") if isinstance(result, dict) else None
+    return JSONResponse(content={"status": "healthy" if all(statuses[n] == "healthy" for n in ("database", "redis", "qdrant")) else "degraded",
+        "timestamp": datetime.utcnow().isoformat(), "uptime_seconds": uptime,
+        "node_environment": settings.ENVIRONMENT, "execution_mode": settings.EXECUTION_MODE,
+        "cpu": cpu, "memory": memory, "subsystem_latencies": latencies, "subsystems_status": statuses})

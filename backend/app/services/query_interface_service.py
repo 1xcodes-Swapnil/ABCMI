@@ -70,6 +70,9 @@ class QueryInterfaceService:
 
     def _extract_tenant_id(self, auth_context: Dict[str, Any]) -> str:
         """Extracts tenant_id from auth context safely."""
+        from app.core.config import get_settings
+        if get_settings().EXECUTION_MODE.upper() == "REAL" and (not auth_context.get("authenticated") or not auth_context.get("tenant_id") or not self._extract_user_id(auth_context)):
+            raise UnauthorizedException("An authenticated account and tenant are required", code="INVALID_CLAIMS")
         tenant_id = auth_context.get("tenant_id")
         if not tenant_id:
             tenant_id = auth_context.get("user_id") or "tenant-default"
@@ -122,8 +125,14 @@ class QueryInterfaceService:
                 correlation_id=request.correlation_id,
             )
             if existing_record:
+                if existing_record.user_id != user_id or existing_record.query != request.query or str(existing_record.meeting_id or "") != str(request.meeting_id or "") or str(existing_record.project_id or "") != str(request.project_id or ""):
+                    raise BadRequestException("Correlation ID is already used by another query or scope", code="CORRELATION_CONFLICT")
+                parameters = request.model_dump(mode="json", exclude={"correlation_id", "request_id"})
+                previous_parameters = (existing_record.provenance or {}).get("request_parameters")
+                if existing_record.search_mode != request.retrieval_mode.value or existing_record.scope != request.scope or (previous_parameters is not None and previous_parameters != parameters):
+                    raise BadRequestException("Correlation ID is already used with different query options", code="CORRELATION_CONFLICT")
                 logger.info(f"Returning cached query for correlation_id={request.correlation_id}")
-                return self._record_to_response(existing_record)
+                return await self.get_query_by_id(existing_record.id, auth_context)
 
         # 1. Input Validation
         cleaned_query = request.query.strip()
@@ -132,10 +141,8 @@ class QueryInterfaceService:
 
         query_id = str(uuid.uuid4())
 
-        # Emit QueryRequested event
-        await self._safe_publish_event(
-            "abci.query.requested",
-            {
+        # Prepare the event; publish only after scope authorization succeeds.
+        requested_event = {
                 "event_type": "QueryRequested",
                 "query_id": query_id,
                 "correlation_id": correlation_id,
@@ -148,8 +155,7 @@ class QueryInterfaceService:
                 "meeting_id": str(request.meeting_id) if request.meeting_id else None,
                 "project_id": str(request.project_id) if request.project_id else None,
                 "timestamp": now.isoformat(),
-            },
-        )
+            }
 
         try:
             # 2. Scope Resolution & Authorization
@@ -164,7 +170,8 @@ class QueryInterfaceService:
                 if not request.meeting_id:
                     raise BadRequestException("meeting_id is required for meeting-scoped query.", code="MISSING_SCOPE_PARAM")
 
-                meeting = await self.meeting_repo.get_by_id(request.meeting_id)
+                from app.services.meeting_service import MeetingService
+                meeting = await MeetingService(self.session).get_meeting(request.meeting_id, auth_context)
                 if not meeting:
                     raise NotFoundException(f"Meeting '{request.meeting_id}' not found.", code="MEETING_NOT_FOUND")
                 m_tenant = getattr(meeting, "tenant_id", None)
@@ -197,9 +204,15 @@ class QueryInterfaceService:
                     project_id=str(project.id),
                     name=project.name,
                 )
-                assoc_res = await self.project_meeting_repo.list_by_project(request.project_id)
-                associations = assoc_res[0] if isinstance(assoc_res, tuple) else assoc_res
+                visible_query = select(Meeting.id).where(Meeting.tenant_id == tenant_id)
+                if auth_context.get("role") != "admin":
+                    visible_query = visible_query.where(MeetingRepository.visible_to(user_id))
+                visible_ids = set((await self.session.execute(visible_query)).scalars().all())
+                associations, _ = await self.project_meeting_repo.list_by_project(request.project_id,
+                    limit=None, visible_meeting_ids=visible_ids)
                 for assoc in associations:
+                    if not assoc.meeting or assoc.meeting_id not in visible_ids:
+                        continue
                     scoped_meeting_ids.add(assoc.meeting_id)
                     if assoc.meeting:
                         referenced_meetings[str(assoc.meeting.id)] = QuerySourceMeeting(
@@ -217,6 +230,8 @@ class QueryInterfaceService:
                 query_stmt = select(Meeting)
                 if hasattr(Meeting, "tenant_id"):
                     query_stmt = query_stmt.where(Meeting.tenant_id == tenant_id)
+                if auth_context.get("role") != "admin":
+                    query_stmt = query_stmt.where(MeetingRepository.visible_to(user_id))
                 if request.date_from:
                     query_stmt = query_stmt.where(Meeting.scheduled_start >= request.date_from)
                 if request.date_to:
@@ -233,6 +248,8 @@ class QueryInterfaceService:
                     )
                 scope_description = f"all {len(scoped_meeting_ids)} accessible tenant meetings"
 
+            await self._safe_publish_event("abci.query.requested", requested_event)
+
             # 3. Knowledge Retrieval
             retrieved_items: List[Dict[str, Any]] = []
 
@@ -248,7 +265,7 @@ class QueryInterfaceService:
                     project_id=str(request.project_id) if request.project_id else None,
                     answer="No meetings or knowledge records are associated with this scope yet.",
                     status=QueryAnswerStatus.INSUFFICIENT_CONTEXT,
-                    confidence=0.0,
+                    confidence=None,
                     retrieval_mode=getattr(request.retrieval_mode, "value", str(request.retrieval_mode)),
                     search_mode=getattr(request.retrieval_mode, "value", str(request.retrieval_mode)),
                     is_low_confidence=True,
@@ -333,16 +350,18 @@ class QueryInterfaceService:
                 retrieved_objects=retrieved_items,
                 context_metadata={"scope_description": scope_description},
             )
+            used_ids = set(synthesis.used_knowledge_ids)
+            sources = [source for source in sources if str(source.knowledge_id) in used_ids]
 
             # Apply request verification override if requested
             requires_verification = synthesis.requires_verification
             if request.require_verification is True:
                 requires_verification = True
-            is_low_confidence = synthesis.confidence < self.CONFIDENCE_THRESHOLD or synthesis.is_low_confidence
+            is_low_confidence = (synthesis.confidence is None or synthesis.confidence < self.CONFIDENCE_THRESHOLD) or synthesis.is_low_confidence
 
             # Filter source meetings to only those actually cited in sources
             cited_meeting_ids = {s.meeting_id for s in sources if s.meeting_id}
-            active_source_meetings = [m for m in referenced_meetings.values() if m.meeting_id in cited_meeting_ids] or list(referenced_meetings.values())[:5]
+            active_source_meetings = [m for m in referenced_meetings.values() if m.meeting_id in cited_meeting_ids]
 
             # 6. Publish appropriate Redis completion event
             event_channel = "abci.query.answered"
@@ -354,9 +373,7 @@ class QueryInterfaceService:
                 event_channel = "abci.query.verification_required"
                 event_type = "QueryVerificationRequired"
 
-            await self._safe_publish_event(
-                event_channel,
-                {
+            completion_event = {
                     "event_type": event_type,
                     "query_id": query_id,
                     "correlation_id": correlation_id,
@@ -370,8 +387,7 @@ class QueryInterfaceService:
                     "meeting_id": str(request.meeting_id) if request.meeting_id else None,
                     "project_id": str(request.project_id) if request.project_id else None,
                     "timestamp": now.isoformat(),
-                },
-            )
+                }
 
             response = QueryResponse(
                 query_id=query_id,
@@ -396,6 +412,7 @@ class QueryInterfaceService:
                     "retrieval_mode": getattr(request.retrieval_mode, "value", str(request.retrieval_mode)),
                     "retrieved_total": len(retrieved_items),
                     "scoped_meetings_count": len(scoped_meeting_ids),
+                    "request_parameters": request.model_dump(mode="json", exclude={"correlation_id", "request_id"}),
                 },
                 created_at=now,
                 updated_at=now,
@@ -403,11 +420,15 @@ class QueryInterfaceService:
 
             # Persist query execution
             await self._persist_query(response=response, tenant_id=tenant_id, user_id=user_id)
+            await self._safe_publish_event(event_channel, completion_event)
             return response
 
         except (BadRequestException, ForbiddenException, NotFoundException, UnauthorizedException):
             raise
         except Exception as e:
+            from fastapi import HTTPException
+            if isinstance(e, HTTPException):
+                raise
             logger.error(f"Unhandled error executing query '{query_id}': {e}", exc_info=True)
             await self._safe_publish_event(
                 "abci.query.failed",
@@ -431,7 +452,7 @@ class QueryInterfaceService:
                 project_id=str(request.project_id) if request.project_id else None,
                 answer="An error occurred while processing your question. Please try again.",
                 status=QueryAnswerStatus.FAILED,
-                confidence=0.0,
+                confidence=None,
                 retrieval_mode=getattr(request.retrieval_mode, "value", str(request.retrieval_mode)),
                 search_mode=getattr(request.retrieval_mode, "value", str(request.retrieval_mode)),
                 is_low_confidence=True,
@@ -458,6 +479,11 @@ class QueryInterfaceService:
             raise NotFoundException(f"Query '{query_id}' not found.", code="QUERY_NOT_FOUND")
         if record.tenant_id != tenant_id:
             raise ForbiddenException("Access to this query is forbidden.", code="TENANT_MISMATCH")
+        if auth_context.get("role") != "admin" and record.user_id != self._extract_user_id(auth_context):
+            raise ForbiddenException("Access to another account's query is forbidden.", code="QUERY_SCOPE_FORBIDDEN")
+        if record.meeting_id:
+            from app.services.meeting_service import MeetingService
+            await MeetingService(self.session).get_meeting(record.meeting_id, auth_context)
 
         return self._record_to_response(record)
 
@@ -484,6 +510,7 @@ class QueryInterfaceService:
         records, total = await self.query_repo.list_by_meeting(
             tenant_id=tenant_id,
             meeting_id=meeting_id,
+            user_id=self._extract_user_id(auth_context) if auth_context.get("role") != "admin" else None,
             start_time=start_time,
             end_time=end_time,
             skip=skip,
@@ -522,6 +549,7 @@ class QueryInterfaceService:
 
         records, total = await self.query_repo.list_queries(
             tenant_id=tenant_id,
+            user_id=self._extract_user_id(auth_context) if auth_context.get("role") != "admin" else None,
             meeting_id=meeting_id,
             project_id=project_id,
             start_time=start_time,
@@ -602,8 +630,11 @@ class QueryInterfaceService:
                 request_id=response.request_id,
             )
             await self.query_repo.create(record)
+            await self.session.commit()
         except Exception as e:
-            logger.warning(f"Failed to persist query record {response.query_id}: {e}")
+            await self.session.rollback()
+            logger.error("Query persistence failed for %s (%s)", response.query_id, type(e).__name__)
+            raise RuntimeError("Query result could not be persisted") from None
 
     def _record_to_response(self, record: QueryRecord) -> QueryResponse:
         """Converts QueryRecord ORM model to QueryResponse schema."""
@@ -680,7 +711,7 @@ class QueryInterfaceService:
                 "source_module": o.source_module,
                 "title": o.title,
                 "content": o.content,
-                "confidence_score": o.confidence if o.confidence is not None else 0.8,
+                "confidence_score": o.confidence,
                 "version": o.version,
                 "lifecycle_state": o.status,
                 "provenance": o.provenance if isinstance(o.provenance, dict) else {},
@@ -700,7 +731,7 @@ class QueryInterfaceService:
         min_confidence: Optional[float] = None,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """Retrieves knowledge via vector semantic indexer with graceful fallback."""
+        """Retrieve vector matches; REAL requests never disguise retrieval failure."""
         if not scoped_meeting_ids:
             return []
 
@@ -722,18 +753,24 @@ class QueryInterfaceService:
                         "source_module": h.get("source_module"),
                         "title": h.get("title"),
                         "content": h.get("content"),
-                        "confidence_score": h.get("confidence") if h.get("confidence") is not None else 0.8,
+                        "confidence_score": h.get("confidence"),
                         "version": h.get("version", 1),
                         "lifecycle_state": h.get("lifecycle_state", "active"),
                         "provenance": h.get("payload", {}).get("provenance", {}),
                         "payload": h.get("payload", {}).get("payload", {}),
-                        "relevance_score": round(float(h.get("score", 0.7)), 2),
+                        "relevance_score": float(h["score"]),
                         "retrieval_source": "semantic",
                     })
         except Exception as e:
+            from app.core.config import get_settings
+            if get_settings().EXECUTION_MODE.upper() == "REAL":
+                raise
             logger.warning(f"Semantic search failed or degraded: {e}. Falling back to structured retrieval.")
 
         if not all_hits:
+            from app.core.config import get_settings
+            if get_settings().EXECUTION_MODE.upper() == "REAL":
+                return []
             return await self._execute_structured_retrieval(
                 query=query,
                 scoped_meeting_ids=scoped_meeting_ids,

@@ -131,6 +131,34 @@ class MockTranslationProvider(TranslationProvider):
         }
 
 
+class GeminiTranslationProvider(TranslationProvider):
+    @property
+    def provider_name(self):
+        return "gemini"
+
+    @property
+    def supported_languages(self):
+        return set(SUPPORTED_LANGUAGES)
+
+    async def detect_language(self, text):
+        # Unknown remains explicit; Gemini detects it in the translation request.
+        return "und"
+
+    async def translate_text(self, text, source_lang, target_lang, metadata=None):
+        from app.ai.gemini_text import GeminiTextProvider
+        from fastapi import HTTPException
+        result, generation = await GeminiTextProvider().generate_json(
+            "Translate all source text faithfully into the target language. Preserve names, uncertainty and meaning. "
+            "Do not add facts or explanations. Detect the source language if it is und. Return ISO language codes.",
+            {"text": text, "source_language": source_lang, "target_language": target_lang},
+            {"type": "OBJECT", "properties": {"translated_text": {"type": "STRING"},
+             "source_language": {"type": "STRING"}, "target_language": {"type": "STRING"}},
+             "required": ["translated_text", "source_language", "target_language"]})
+        if not isinstance(result.get("translated_text"), str) or not result["translated_text"].strip() or result.get("target_language") != target_lang:
+            raise HTTPException(502, "Gemini translation is empty or has an incorrect target language")
+        return {**result, "confidence": None, "is_fixture": False, "generation": generation}
+
+
 class TranslationProviderRegistry:
     """Registry managing translation engine providers."""
 
@@ -138,11 +166,18 @@ class TranslationProviderRegistry:
         self._providers: Dict[str, TranslationProvider] = {}
         default_mock = MockTranslationProvider("mock_translation_provider")
         self.register(default_mock)
+        self.register(GeminiTranslationProvider())
 
     def register(self, provider: TranslationProvider) -> None:
         self._providers[provider.provider_name] = provider
 
     def get(self, provider_name: Optional[str] = None) -> TranslationProvider:
+        from app.core.config import get_settings
+        from fastapi import HTTPException
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            provider_name = provider_name or get_settings().TEXT_AI_PROVIDER.lower()
+            if provider_name != "gemini":
+                raise HTTPException(503, "REAL translation requires the configured Gemini provider")
         name = provider_name or "mock_translation_provider"
         provider = self._providers.get(name)
         if not provider:
@@ -201,14 +236,20 @@ class TranslationEngine:
             metadata=metadata,
         )
 
-        confidence = float(result.get("confidence", 0.90))
-        is_low_confidence = confidence < confidence_threshold
+        translated = result.get("translated_text")
+        if not isinstance(translated, str) or not translated.strip():
+            raise ValueError("Translation provider returned no translated text")
+        from app.core.config import get_settings
+        if get_settings().EXECUTION_MODE.upper() == "REAL" and result.get("is_fixture") is not False:
+            raise ValueError("REAL translation requires explicit non-fixture provider provenance")
+        confidence = float(result["confidence"]) if result.get("confidence") is not None else None
+        is_low_confidence = confidence is None or confidence < confidence_threshold
         requires_verification = is_low_confidence or (metadata.get("requires_verification", False) if metadata else False)
 
         provenance = ProvenanceMetadataSchema(
             producing_module="TranslationEngine",
             model_name=provider.provider_name,
-            model_version="1.0.0",
+            model_version=result.get("generation", {}).get("model_version"),
             source_segments=metadata.get("source_segments", []) if metadata else [],
             source_intervals=metadata.get("source_intervals", []) if metadata else [],
             lineage={
@@ -223,11 +264,12 @@ class TranslationEngine:
                 "is_low_confidence": is_low_confidence,
                 "requires_verification": requires_verification,
                 "correlation_id": correlation_id,
+                "generation": result.get("generation"),
             },
         )
 
         return {
-            "translated_text": result.get("translated_text", text),
+            "translated_text": translated,
             "source_language": norm_source,
             "target_language": norm_target,
             "confidence": confidence,

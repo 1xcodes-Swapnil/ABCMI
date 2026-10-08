@@ -53,6 +53,10 @@ class MeetingIntelligenceService:
         """Enforces authentication and tenant isolation."""
         if not auth_context or not auth_context.get("authenticated", False):
             raise ForbiddenException(message="Authentication required", code="UNAUTHORIZED")
+        from app.core.config import get_settings
+        if meeting is not None and get_settings().EXECUTION_MODE.upper() == 'REAL':
+            from app.services.meeting_service import MeetingService
+            MeetingService(self.db).verify_scope(meeting, auth_context)
         meeting_tenant = getattr(meeting, "tenant_id", None) if meeting else None
         if meeting_tenant:
             user_tenant = auth_context.get("tenant_id")
@@ -90,8 +94,8 @@ class MeetingIntelligenceService:
         else:
             priority_enum = ActionItemPriority.MEDIUM
 
-        confidence = ko.confidence if ko.confidence is not None else 1.0
-        is_low_conf = confidence < 0.75
+        confidence = ko.confidence
+        is_low_conf = confidence is None or confidence < 0.75
         requires_verification = payload.get("requires_verification", is_low_conf)
 
         source_segments = payload.get("source_segments") or provenance.get("source_segments") or []
@@ -212,6 +216,7 @@ class MeetingIntelligenceService:
             "assignee": payload.assignee,
             "due_date": payload.due_date,
             "source_segments": payload.source_segment_ids or [],
+            "representation": "user_entered_action",
         }
 
         provenance = {
@@ -228,7 +233,7 @@ class MeetingIntelligenceService:
             source_module="ActionItemService",
             title=payload.title,
             content=payload.description or payload.title,
-            confidence=1.0,
+            confidence=None,
             status=KnowledgeObjectStatus.ACTIVE.value,
             version=1,
             payload=item_payload,
@@ -289,12 +294,14 @@ class MeetingIntelligenceService:
                 ko.status = KnowledgeObjectStatus.ACTIVE.value
         if payload.priority is not None:
             current_payload["priority"] = getattr(payload.priority, "value", payload.priority)
-        if payload.assignee is not None:
+        if "assignee" in payload.model_fields_set:
             current_payload["assignee"] = payload.assignee
-        if payload.due_date is not None:
+        if "due_date" in payload.model_fields_set:
             current_payload["due_date"] = payload.due_date
         if payload.confidence is not None:
             ko.confidence = payload.confidence
+            current_prov["confidence_source"] = "user_estimate"
+            current_prov["confidence_updated_by"] = user_id
 
         # Increment version & update audit lineage
         ko.version += 1
@@ -460,8 +467,8 @@ class MeetingIntelligenceService:
         results = []
         for ko in kos:
             payload = ko.payload or {}
-            confidence = ko.confidence if ko.confidence is not None else 1.0
-            is_low = confidence < 0.75
+            confidence = ko.confidence
+            is_low = confidence is None or confidence < 0.75
             results.append(
                 DecisionResponse(
                     id=ko.id,
@@ -563,8 +570,8 @@ class MeetingIntelligenceService:
         results = []
         for ko in kos:
             payload = ko.payload or {}
-            confidence = ko.confidence if ko.confidence is not None else 1.0
-            is_low = confidence < 0.75
+            confidence = ko.confidence
+            is_low = confidence is None or confidence < 0.75
             results.append(
                 InsightResponse(
                     id=ko.id,

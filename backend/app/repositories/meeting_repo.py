@@ -5,7 +5,7 @@ PostgreSQL async implementation for Meeting entity operations.
 
 from typing import Optional, Sequence
 import uuid
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -18,6 +18,22 @@ class MeetingRepository(BaseRepository[Meeting]):
 
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(Meeting, session)
+
+    @staticmethod
+    def visible_to(user_id):
+        from app.models.participant import Participant
+        return or_(Meeting.host_id == user_id, Meeting.host_id.is_(None),
+                   Meeting.participants.any(Participant.user_id == user_id))
+
+    async def list(self, skip=0, limit=100, viewer_id=None, **filters):
+        query = select(Meeting).options(selectinload(Meeting.participants),
+                                       selectinload(Meeting.audio_recordings))
+        for key, value in filters.items():
+            query = query.where(getattr(Meeting, key) == value)
+        if viewer_id is not None:
+            query = query.where(self.visible_to(viewer_id))
+        result = await self.session.execute(query.order_by(Meeting.created_at.desc()).offset(skip).limit(limit))
+        return result.scalars().all()
 
     async def get_with_relations(self, meeting_id: uuid.UUID) -> Optional[Meeting]:
         """Fetch meeting with eagerly loaded participants, audio, transcripts, analytics, and knowledge objects."""

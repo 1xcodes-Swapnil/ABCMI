@@ -82,10 +82,13 @@ class ProjectMeetingRepository(BaseRepository[ProjectMeeting]):
         self,
         project_id: uuid.UUID,
         skip: int = 0,
-        limit: int = 50,
+        limit: Optional[int] = 50,
+        visible_meeting_ids=None,
     ) -> Tuple[List[ProjectMeeting], int]:
         """List meetings associated with a project."""
         query = select(ProjectMeeting).where(ProjectMeeting.project_id == project_id)
+        if visible_meeting_ids is not None:
+            query = query.where(ProjectMeeting.meeting_id.in_(visible_meeting_ids))
 
         count_stmt = select(func.count()).select_from(query.subquery())
         total_res = await self.session.execute(count_stmt)

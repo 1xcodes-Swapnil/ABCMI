@@ -319,6 +319,12 @@ async def execute_cli_pipeline(
     if get_settings().EXECUTION_MODE.upper() == "REAL" and not segments:
         raise RuntimeError("REAL processing completed without persisted transcript segments.")
     speakers = sorted(list(set(s.speaker_label for s in segments if s.speaker_label)))
+    from app.repositories.transcript_repo import TranscriptRepository
+    canonical = await TranscriptRepository(db).get_latest_version(meeting.id)
+    provenance = (canonical.provenance or {}) if canonical else {}
+    quality_warnings = provenance.get("quality_warnings", [])
+    for warning in quality_warnings:
+        print(f"    [WARNING] {warning}")
 
     # Step 6: Generate Meeting Report
     step_num += 1
@@ -362,7 +368,10 @@ async def execute_cli_pipeline(
         "confidence": (sum(s.confidence for s in segments if s.confidence is not None) /
                        sum(s.confidence is not None for s in segments))
                       if any(s.confidence is not None for s in segments) else None,
-        "verification_required": any(s.confidence is None for s in segments),
+        "verification_required": bool(quality_warnings) or any(s.confidence is None for s in segments),
+        "canonical_transcript_id": str(canonical.id) if canonical else None,
+        "overlap_resolution": provenance.get("overlap_resolution", {}),
+        "quality_warnings": quality_warnings,
         "summary_text": summary_resp.content if summary_resp else "No summary available.",
         "decisions": [d.model_dump() for d in decisions_resp] if decisions_resp else [],
         "action_items": [a.model_dump() for a in action_items_resp] if action_items_resp else [],

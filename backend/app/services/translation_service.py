@@ -49,6 +49,10 @@ class TranslationService:
         """Enforces tenant isolation and authentication."""
         if not auth_context or not auth_context.get("authenticated", False):
             raise ForbiddenException(message="Authentication required", code="UNAUTHORIZED")
+        from app.core.config import get_settings
+        if meeting is not None and get_settings().EXECUTION_MODE.upper() == 'REAL':
+            from app.services.meeting_service import MeetingService
+            MeetingService(self.db).verify_scope(meeting, auth_context)
         meeting_tenant = getattr(meeting, "tenant_id", None) if meeting else None
         if meeting_tenant:
             user_tenant = auth_context.get("tenant_id")
@@ -113,16 +117,20 @@ class TranslationService:
         )
 
         results: List[DerivedTranslation] = []
+        generated: List[DerivedTranslation] = []
+        # Serialize generation for one meeting so concurrent requests reuse committed translations.
+        await self.db.execute(select(Meeting.id).where(Meeting.id == meeting_id).with_for_update())
 
         # 1. Process Transcript Segments if requested
         if "transcript" in rep_types:
-            segments = await self.segment_repo.list_by_meeting(meeting_id, limit=1000)
+            segments = (await self.db.execute(select(TranscriptSegment).where(
+                TranscriptSegment.meeting_id == meeting_id).order_by(TranscriptSegment.sequence_number))).scalars().all()
             if request.source_object_ids:
                 allowed_ids = set(request.source_object_ids)
                 segments = [s for s in segments if s.id in allowed_ids]
 
             for seg in segments:
-                if not seg.text or not seg.text.strip():
+                if not seg.original_text or not seg.original_text.strip():
                     continue
 
                 # Idempotency Check
@@ -144,7 +152,7 @@ class TranslationService:
                 seg_source_lang = (seg.language or source_lang).strip().lower()
 
                 engine_res = await self.engine.translate(
-                    text=seg.text,
+                    text=seg.original_text,
                     target_language=target_lang,
                     source_language=seg_source_lang,
                     confidence_threshold=conf_threshold,
@@ -157,6 +165,7 @@ class TranslationService:
                 )
 
                 dt = DerivedTranslation(
+                    id=uuid.uuid4(),
                     meeting_id=meeting_id,
                     tenant_id=str(tenant_id) if tenant_id else None,
                     source_object_id=None,
@@ -164,7 +173,7 @@ class TranslationService:
                     representation_type="transcript",
                     source_language=seg_source_lang,
                     target_language=target_lang,
-                    original_text=seg.text,
+                    original_text=seg.original_text,
                     translated_text=engine_res["translated_text"],
                     confidence=engine_res["confidence"],
                     is_low_confidence=engine_res["is_low_confidence"],
@@ -180,37 +189,15 @@ class TranslationService:
                 )
                 self.db.add(dt)
                 results.append(dt)
-
-                # Emit events
-                await self.event_bus.publish(
-                    "DerivedRepresentationGenerated",
-                    {
-                        "translation_id": str(dt.id),
-                        "meeting_id": str(meeting_id),
-                        "representation_type": "transcript",
-                        "target_language": target_lang,
-                        "confidence": dt.confidence,
-                        "correlation_id": correlation_id,
-                    },
-                )
-                if dt.requires_verification:
-                    await self.event_bus.publish(
-                        "TranslationVerificationRequired",
-                        {
-                            "translation_id": str(dt.id),
-                            "meeting_id": str(meeting_id),
-                            "representation_type": "transcript",
-                            "confidence": dt.confidence,
-                            "correlation_id": correlation_id,
-                        },
-                    )
+                generated.append(dt)
 
         # 2. Process Knowledge Objects
         ko_types = rep_types.intersection({
             "summary", "topic", "decision", "action_item", "fact", "hypothesis", "transcript_insight"
         })
         if ko_types:
-            all_kos = await self.ko_repo.list_by_meeting(meeting_id, limit=500)
+            all_kos = (await self.db.execute(select(KnowledgeObject).where(
+                KnowledgeObject.meeting_id == meeting_id))).scalars().all()
             target_kos = [k for k in all_kos if k.object_type in ko_types]
             if request.source_object_ids:
                 allowed_ids = set(request.source_object_ids)
@@ -249,6 +236,7 @@ class TranslationService:
                 )
 
                 dt = DerivedTranslation(
+                    id=uuid.uuid4(),
                     meeting_id=meeting_id,
                     tenant_id=str(tenant_id) if tenant_id else None,
                     source_object_id=ko.id,
@@ -272,32 +260,18 @@ class TranslationService:
                 )
                 self.db.add(dt)
                 results.append(dt)
-
-                # Emit events
-                await self.event_bus.publish(
-                    "DerivedRepresentationGenerated",
-                    {
-                        "translation_id": str(dt.id),
-                        "meeting_id": str(meeting_id),
-                        "representation_type": ko.object_type,
-                        "target_language": target_lang,
-                        "confidence": dt.confidence,
-                        "correlation_id": correlation_id,
-                    },
-                )
-                if dt.requires_verification:
-                    await self.event_bus.publish(
-                        "TranslationVerificationRequired",
-                        {
-                            "translation_id": str(dt.id),
-                            "meeting_id": str(meeting_id),
-                            "representation_type": ko.object_type,
-                            "confidence": dt.confidence,
-                            "correlation_id": correlation_id,
-                        },
-                    )
+                generated.append(dt)
 
         await self.db.commit()
+
+        for translated in generated:
+            event = {"translation_id": str(translated.id), "meeting_id": str(meeting_id),
+                     "tenant_id": str(tenant_id), "representation_type": translated.representation_type,
+                     "target_language": target_lang, "confidence": translated.confidence,
+                     "correlation_id": correlation_id}
+            await self.event_bus.publish("DerivedRepresentationGenerated", event)
+            if translated.requires_verification:
+                await self.event_bus.publish("TranslationVerificationRequired", {k: v for k, v in event.items() if k != "event_id"})
 
         # Emit TranslationGenerated summary event
         await self.event_bus.publish(
@@ -376,6 +350,8 @@ class TranslationService:
     ) -> DerivedTranslation:
         """Regenerates a translation deterministically while maintaining version lineage."""
         dt = await self.get_translation(translation_id, auth_context)
+        await self.db.execute(select(DerivedTranslation.id).where(DerivedTranslation.id == translation_id).with_for_update())
+        await self.db.refresh(dt)
 
         target_lang = (request.target_language or dt.target_language).strip().lower()
         correlation_id = request.correlation_id or dt.correlation_id or str(uuid.uuid4())
@@ -392,13 +368,18 @@ class TranslationService:
             correlation_id=correlation_id,
         )
 
+        previous = {"version": dt.version, "target_language": dt.target_language,
+                    "translated_text": dt.translated_text, "confidence": dt.confidence,
+                    "correlation_id": dt.correlation_id,
+                    "generation": (dt.provenance or {}).get("processing_metadata", {})}
+        history = list((dt.provenance or {}).get("translation_history", [])) + [previous]
         dt.target_language = target_lang
         dt.translated_text = engine_res["translated_text"]
         dt.confidence = engine_res["confidence"]
         dt.is_low_confidence = engine_res["is_low_confidence"]
         dt.requires_verification = engine_res["requires_verification"]
         dt.version += 1
-        dt.provenance = engine_res["provenance"]
+        dt.provenance = {**engine_res["provenance"], "translation_history": history}
         dt.correlation_id = correlation_id
 
         await self.db.commit()

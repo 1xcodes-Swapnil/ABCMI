@@ -3,9 +3,11 @@ ABCI-MI PostgreSQL Database Infrastructure
 Configures SQLAlchemy Async & Sync engines, session factories, and health checks.
 """
 
+import asyncio
 import time
 from typing import Any, AsyncGenerator, Dict, Optional
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -39,8 +41,12 @@ def init_database() -> AsyncEngine:
         logger.info(
             f"Initializing PostgreSQL async engine for host {settings.POSTGRES_SERVER}:{settings.POSTGRES_PORT} (DB: {settings.POSTGRES_DB})"
         )
+        connect_args = {}
+        if make_url(settings.async_database_url).drivername == "postgresql+asyncpg":
+            connect_args["timeout"] = settings.DATABASE_CONNECT_TIMEOUT_SECONDS
         async_engine = create_async_engine(
             settings.async_database_url,
+            connect_args=connect_args,
             pool_size=settings.DATABASE_POOL_SIZE,
             max_overflow=settings.DATABASE_MAX_OVERFLOW,
             pool_timeout=settings.DATABASE_POOL_TIMEOUT,
@@ -102,28 +108,19 @@ async def check_database_health() -> Dict[str, Any]:
 
         assert async_engine is not None, "Engine initialization failed."
 
-        async with async_engine.connect() as conn:
-            # Execute quick test query with short timeout
-            result = await conn.execute(text("SELECT 1"))
-            val = result.scalar()
+        async with asyncio.timeout(settings.DATABASE_HEALTH_TIMEOUT_SECONDS):
+            async with async_engine.connect() as conn:
+                result = await conn.execute(text("SELECT 1"))
+                val = result.scalar()
 
-            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
-            if val == 1:
-                return {
-                    "status": "healthy",
-                    "latency_ms": latency_ms,
-                    "database": settings.POSTGRES_DB,
-                    "host": settings.POSTGRES_SERVER,
-                    "error": None,
-                }
-            else:
-                return {
-                    "status": "unhealthy",
-                    "latency_ms": latency_ms,
-                    "database": settings.POSTGRES_DB,
-                    "host": settings.POSTGRES_SERVER,
-                    "error": "Unexpected query result",
-                }
+        latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        return {
+            "status": "healthy" if val == 1 else "unhealthy",
+            "latency_ms": latency_ms,
+            "database": settings.POSTGRES_DB,
+            "host": settings.POSTGRES_SERVER,
+            "error": None if val == 1 else "Unexpected query result",
+        }
     except Exception as e:
         latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
         logger.debug(f"PostgreSQL health check failed: {str(e)}")
@@ -132,5 +129,5 @@ async def check_database_health() -> Dict[str, Any]:
             "latency_ms": latency_ms,
             "database": settings.POSTGRES_DB,
             "host": settings.POSTGRES_SERVER,
-            "error": str(e),
+            "error": "PostgreSQL health check timed out" if isinstance(e, TimeoutError) else str(e),
         }

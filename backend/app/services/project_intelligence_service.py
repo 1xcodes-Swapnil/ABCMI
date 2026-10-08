@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import get_settings
 from app.core.exceptions import BadRequestException, ForbiddenException, NotFoundException
 from app.core.logging import get_logger
 from app.events.redis_bus import RedisEventBus
@@ -60,14 +61,22 @@ class ProjectIntelligenceService:
         self.ko_repo = KnowledgeObjectRepository(db)
         self.event_bus = RedisEventBus()
 
+    async def _visible_meeting_ids(self, tenant_id, auth_context):
+        query = select(Meeting.id).where(Meeting.tenant_id == tenant_id)
+        if auth_context and auth_context.get("role") != "admin":
+            query = query.where(MeetingRepository.visible_to(uuid.UUID(str(auth_context["user_id"]))))
+        return set((await self.db.execute(query)).scalars().all())
+
     def _validate_auth(self, auth_context: Dict[str, Any], tenant_id: Optional[str] = None) -> None:
         """Validates that caller is authenticated and enforces tenant isolation."""
         if not auth_context or not auth_context.get("authenticated", False):
             raise ForbiddenException(message="Authentication required", code="UNAUTHORIZED")
+        if get_settings().EXECUTION_MODE.upper() == "REAL" and not auth_context.get("tenant_id"):
+            raise ForbiddenException(message="Authorized tenant is required", code="MISSING_TENANT")
         if tenant_id:
             user_tenant = auth_context.get("tenant_id")
             role = str(auth_context.get("role", "")).lower()
-            if user_tenant and user_tenant != tenant_id and role not in {"admin", "security_officer", "security_auditor"}:
+            if user_tenant != tenant_id:
                 raise ForbiddenException(
                     message="Access denied: Cross-tenant operation forbidden",
                     code="FORBIDDEN_CROSS_TENANT",
@@ -117,6 +126,7 @@ class ProjectIntelligenceService:
             tenant_id=tenant_id,
             status=getattr(payload.status, "value", payload.status),
             created_by=user_id,
+            owner_id=uuid.UUID(str(user_id)),
             settings=payload.settings or {},
         )
         created = await self.project_repo.create(project)
@@ -144,7 +154,7 @@ class ProjectIntelligenceService:
         auth_context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[ProjectResponse], int]:
         """Lists projects for caller's tenant."""
-        if auth_context:
+        if auth_context or get_settings().EXECUTION_MODE.upper() == "REAL":
             self._validate_auth(auth_context)
             tenant_id = auth_context.get("tenant_id", "default")
         else:
@@ -249,7 +259,8 @@ class ProjectIntelligenceService:
         if not project:
             raise NotFoundException(message=f"Project '{project_id}' not found", code="PROJECT_NOT_FOUND")
 
-        meeting = await self.meeting_repo.get_by_id(meeting_id)
+        from app.services.meeting_service import MeetingService
+        meeting = await MeetingService(self.db).get_meeting(meeting_id, auth_context)
         if not meeting:
             raise NotFoundException(message=f"Meeting '{meeting_id}' not found", code="MEETING_NOT_FOUND")
 
@@ -257,7 +268,7 @@ class ProjectIntelligenceService:
 
         # Enforce cross-tenant isolation between project and meeting
         role = str(auth_context.get("role", "")).lower()
-        if meeting.tenant_id and meeting.tenant_id != project.tenant_id and role not in {"admin", "security_officer", "security_auditor"}:
+        if meeting.tenant_id != project.tenant_id:
             raise ForbiddenException(
                 message="Cannot associate meeting with project: Cross-tenant mismatch",
                 code="FORBIDDEN_CROSS_TENANT",
@@ -355,18 +366,21 @@ class ProjectIntelligenceService:
         if not project:
             raise NotFoundException(message=f"Project '{project_id}' not found", code="PROJECT_NOT_FOUND")
 
-        if auth_context:
+        if auth_context or get_settings().EXECUTION_MODE.upper() == "REAL":
             self._validate_auth(auth_context, project.tenant_id)
 
         assocs, total = await self.project_meeting_repo.list_by_project(
             project_id=project_id,
             skip=offset,
             limit=limit,
+            visible_meeting_ids=await self._visible_meeting_ids(project.tenant_id, auth_context),
         )
 
         results = []
         for a in assocs:
             meeting = a.meeting
+            if not meeting or meeting.tenant_id != project.tenant_id:
+                raise ForbiddenException(message="Invalid cross-tenant project association", code="FORBIDDEN_CROSS_TENANT")
             results.append(
                 ProjectMeetingResponse(
                     id=a.id,
@@ -396,15 +410,16 @@ class ProjectIntelligenceService:
         if not project:
             raise NotFoundException(message=f"Project '{project_id}' not found", code="PROJECT_NOT_FOUND")
 
-        if auth_context:
+        if auth_context or get_settings().EXECUTION_MODE.upper() == "REAL":
             self._validate_auth(auth_context, project.tenant_id)
 
         meetings_map: Dict[uuid.UUID, Meeting] = {}
         meeting_ids: List[uuid.UUID] = []
+        visible_ids = await self._visible_meeting_ids(project.tenant_id, auth_context)
 
         if project.project_meetings:
             for pm in project.project_meetings:
-                if pm.meeting:
+                if pm.meeting and pm.meeting_id in visible_ids:
                     meetings_map[pm.meeting_id] = pm.meeting
                     meeting_ids.append(pm.meeting_id)
 
@@ -498,8 +513,8 @@ class ProjectIntelligenceService:
             if item_assignee:
                 assignee_counter[item_assignee] += 1
 
-            confidence = ko.confidence if ko.confidence is not None else 1.0
-            is_low = confidence < 0.75
+            confidence = ko.confidence
+            is_low = confidence is None or confidence < 0.75
 
             ai_resp = ActionItemResponse(
                 id=ko.id,
@@ -594,8 +609,8 @@ class ProjectIntelligenceService:
         for ko in kos:
             payload = ko.payload or {}
             meeting = meetings_map.get(ko.meeting_id)
-            confidence = ko.confidence if ko.confidence is not None else 1.0
-            is_low = confidence < 0.75
+            confidence = ko.confidence
+            is_low = confidence is None or confidence < 0.75
 
             results.append(
                 CrossMeetingDecisionItem(
@@ -695,7 +710,7 @@ class ProjectIntelligenceService:
         recurring_list: List[RecurringTopicItem] = []
         for key, grp in topic_groups.items():
             occurrence_count = len(grp["meeting_ids"])
-            avg_conf = sum(grp["confidences"]) / len(grp["confidences"]) if grp["confidences"] else 1.0
+            avg_conf = sum(grp["confidences"]) / len(grp["confidences"]) if grp["confidences"] else None
             m_ids = list(grp["meeting_ids"])
             m_titles = [meetings_map[m].title for m in m_ids if m in meetings_map]
 
@@ -708,12 +723,12 @@ class ProjectIntelligenceService:
                     keywords=list(grp["keywords"])[:10],
                     first_seen=grp["first_seen"],
                     last_seen=grp["last_seen"],
-                    average_confidence=round(avg_conf, 2),
+                    average_confidence=round(avg_conf, 2) if avg_conf is not None else None,
                 )
             )
 
         # Sort by occurrence count descending, then confidence
-        recurring_list.sort(key=lambda x: (x.occurrence_count, x.average_confidence), reverse=True)
+        recurring_list.sort(key=lambda x: (x.occurrence_count, x.average_confidence if x.average_confidence is not None else -1), reverse=True)
 
         return RecurringTopicsResponse(
             project_id=project_id,
@@ -765,8 +780,8 @@ class ProjectIntelligenceService:
             sentiment = payload.get("sentiment", "neutral").lower()
             sentiment_counter[sentiment] += 1
 
-            confidence = ko.confidence if ko.confidence is not None else 1.0
-            is_low = confidence < 0.75
+            confidence = ko.confidence
+            is_low = confidence is None or confidence < 0.75
 
             items.append(
                 CrossMeetingInsightItem(
@@ -950,11 +965,12 @@ class ProjectIntelligenceService:
         """
         Discovers related meetings sharing overlapping topics, keywords, or projects with similarity scoring.
         """
-        target_meeting = await self.meeting_repo.get_by_id(meeting_id)
+        from app.services.meeting_service import MeetingService
+        target_meeting = await MeetingService(self.db).get_meeting(meeting_id, auth_context)
         if not target_meeting:
             raise NotFoundException(message=f"Meeting '{meeting_id}' not found", code="MEETING_NOT_FOUND")
 
-        if auth_context:
+        if auth_context or get_settings().EXECUTION_MODE.upper() == "REAL":
             self._validate_auth(auth_context, target_meeting.tenant_id)
 
         # Find target meeting topics & keywords
@@ -979,6 +995,8 @@ class ProjectIntelligenceService:
             Meeting.tenant_id == target_meeting.tenant_id,
             Meeting.id != meeting_id,
         )
+        if auth_context and auth_context.get("role") != "admin":
+            candidate_stmt = candidate_stmt.where(MeetingRepository.visible_to(uuid.UUID(str(auth_context["user_id"]))))
         cand_res = await self.db.execute(candidate_stmt)
         candidates = list(cand_res.scalars().all())
 

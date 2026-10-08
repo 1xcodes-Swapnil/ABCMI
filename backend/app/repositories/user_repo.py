@@ -18,6 +18,15 @@ class UserRepository(BaseRepository[User]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(User, session)
 
+    @staticmethod
+    def tenant_membership(tenant_id: str):
+        from app.models.meeting import Meeting
+        from app.models.participant import Participant
+        hosted = select(Meeting.id).where(Meeting.host_id == User.id, Meeting.tenant_id == tenant_id).exists()
+        participant = select(Participant.id).join(Meeting, Meeting.id == Participant.meeting_id).where(
+            Participant.user_id == User.id, Meeting.tenant_id == tenant_id).exists()
+        return (User.login_tenant_id == tenant_id) | hosted | participant
+
     async def get_by_email(self, email: str) -> Optional[User]:
         """Fetch user by exact email address (case-insensitive search)."""
         query = select(User).where(User.email == email.lower().strip())
@@ -60,12 +69,15 @@ class UserRepository(BaseRepository[User]):
         search: Optional[str] = None,
         skip: int = 0,
         limit: int = 50,
+        tenant_id: Optional[str] = None,
     ) -> Tuple[Sequence[User], int]:
         """
         List users with filtering across role, status, and full text search on email/name.
         Returns a tuple of (users, total_count).
         """
         base_filters = []
+        if tenant_id is not None:
+            base_filters.append(self.tenant_membership(tenant_id))
         if role:
             base_filters.append(User.role == role.lower().strip())
         if status:

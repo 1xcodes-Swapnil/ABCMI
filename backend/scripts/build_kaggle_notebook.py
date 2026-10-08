@@ -444,7 +444,9 @@ markdown('''
 - A model inventory, successful import, HTTP 200 or empty artifact is not inference success.
 - Timeline coverage refers to processing all real audio chunks, not proof that every word was transcribed correctly.
 - Speaker mappings and overlap dedup decisions are observed algorithm outputs, not ground-truth accuracy.
-- The current source-separation gate, unavailable services, gated model access, dependency conflicts,
+- Detected overlap without a separation provider is explicitly UNRESOLVED; original ASR text is retained
+  with persisted quality warnings. No separated audio, corrected overlap words or separation accuracy is claimed.
+- Unavailable services, gated model access, dependency conflicts,
   token-limit failures or model OOMs are recorded as actual blockers.
 - Do not publish credentials or private transcript evidence with notebook output. Source code contains
   no local environment file; executed artifacts contain actual user audio/transcript data.

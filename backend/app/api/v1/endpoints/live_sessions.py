@@ -17,6 +17,8 @@ from app.schemas.live_session import (
     LiveSessionStatusResponse,
 )
 from app.services.live_session_service import LiveSessionService
+from app.core.config import get_settings
+from app.core.exceptions import AppException
 
 logger = get_logger(__name__)
 
@@ -87,7 +89,10 @@ async def ingest_audio_chunk(
 ) -> AudioChunkResponse:
     """Ingest a sequential audio chunk for the active live session."""
     service = LiveSessionService(db)
-    file_bytes = await file.read()
+    limit = get_settings().LIVE_MAX_CHUNK_BYTES
+    file_bytes = await file.read(limit + 1)
+    if len(file_bytes) > limit:
+        raise AppException(message="Live chunk exceeds byte limit", status_code=413)
     chunk, _ = await service.ingest_chunk(
         meeting_id=meeting_id,
         sequence_number=sequence_number,

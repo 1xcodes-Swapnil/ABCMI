@@ -106,7 +106,7 @@ class KnowledgePublisher:
                 version=obj.version,
                 lifecycle_state=SKWLifecycleState(current_state) if current_state in SKWLifecycleState._value2member_map_ else SKWLifecycleState.INDEXED,
                 provenance=obj.provenance or {},
-                metadata=obj.metadata or {},
+                metadata=obj.knowledge_metadata,
                 payload=obj.payload or {},
             )
             try:
@@ -153,7 +153,7 @@ class KnowledgePublisher:
             version=published_obj.version,
             lifecycle_state=SKWLifecycleState.PUBLISHED,
             provenance=published_obj.provenance or {},
-            metadata=published_obj.metadata or {},
+            metadata=published_obj.knowledge_metadata,
             payload=published_obj.payload or {},
         )
         await self.event_publisher.publish_published(

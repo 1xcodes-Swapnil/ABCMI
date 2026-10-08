@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # ============================================================================
   # 1. PostgreSQL Database Service
@@ -58,12 +56,6 @@ services:
       - "${QDRANT_GRPC_PORT:-6334}:6334" # gRPC API
     volumes:
       - qdrant_data:/qdrant/storage
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
     networks:
       - abcimi_network
 
@@ -87,6 +79,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_password}
       POSTGRES_DB: ${POSTGRES_DB:-abcimi_db}
+      # Use the Redis service in this Compose project even if backend/.env
+      # defines a managed REDIS_URL, which otherwise takes precedence.
+      REDIS_URL: ""
       REDIS_HOST: redis
       REDIS_PORT: 6379
       QDRANT_HOST: qdrant
@@ -96,14 +91,15 @@ services:
       - "${PORT:-8000}:8000"
     volumes:
       - .:/app
-      - audio_data:/app/data/audio
+      # Keep uploaded audio visible to the host REAL inference worker.
+      - ../data/audio:/app/data/audio
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
       qdrant:
-        condition: service_healthy
+        condition: service_started
     networks:
       - abcimi_network
 
@@ -113,8 +109,6 @@ volumes:
   redis_data:
     driver: local
   qdrant_data:
-    driver: local
-  audio_data:
     driver: local
 
 networks:

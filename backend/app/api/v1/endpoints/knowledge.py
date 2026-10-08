@@ -6,7 +6,7 @@ version history, and publishing, fully integrated with authentication, RBAC, and
 
 from typing import Any, Dict, List, Optional
 import uuid
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.database import get_async_db
@@ -25,7 +25,34 @@ from app.skw.services.knowledge_query_engine import KnowledgeQueryEngine
 from app.repositories.knowledge_object_repo import KnowledgeObjectRepository
 
 
-router = APIRouter(prefix="/knowledge", tags=["Knowledge Management (SKW)"])
+async def verify_knowledge_scope(request: Request, auth=Depends(verify_authentication), db=Depends(get_async_db)):
+    from app.core.config import get_settings
+    if get_settings().EXECUTION_MODE.upper() != 'REAL':
+        return
+    from app.services.meeting_service import MeetingService
+    from app.models.knowledge_object import KnowledgeObject
+    meeting_id = request.path_params.get('meeting_id')
+    knowledge_id = request.path_params.get('knowledge_id')
+    if knowledge_id:
+        try:
+            obj = await db.get(KnowledgeObject, uuid.UUID(knowledge_id))
+        except ValueError:
+            raise HTTPException(422, 'Invalid knowledge ID')
+        if not obj:
+            raise HTTPException(404, 'Knowledge object not found')
+        meeting_id = obj.meeting_id
+    if not meeting_id and request.method == 'POST':
+        meeting_id = (await request.json()).get('meeting_id')
+    if not meeting_id:
+        raise HTTPException(422, 'REAL knowledge access requires an explicit meeting scope')
+    try:
+        meeting_id = uuid.UUID(str(meeting_id))
+    except ValueError:
+        raise HTTPException(422, 'Invalid meeting ID')
+    await MeetingService(db).get_meeting(meeting_id, auth)
+
+
+router = APIRouter(prefix="/knowledge", tags=["Knowledge Management (SKW)"], dependencies=[Depends(verify_knowledge_scope)])
 
 
 def _to_response(obj: Any) -> KnowledgeObjectResponse:
@@ -48,7 +75,7 @@ def _to_response(obj: Any) -> KnowledgeObjectResponse:
             source_module=obj.get("source_module"),
             content=obj.get("content"),
             title=obj.get("title"),
-            confidence_score=obj.get("confidence_score") or obj.get("confidence"),
+            confidence_score=obj.get("confidence_score") if obj.get("confidence_score") is not None else obj.get("confidence"),
             version=obj.get("version", 1),
             lifecycle_state=obj.get("lifecycle_state") or obj.get("status", "created"),
             provenance=prov,
@@ -58,7 +85,7 @@ def _to_response(obj: Any) -> KnowledgeObjectResponse:
             updated_at=obj.get("updated_at"),
         )
     else:
-        meta = obj.metadata if (hasattr(obj, "metadata") and isinstance(obj.metadata, dict)) else {}
+        meta = obj.knowledge_metadata
         prov = obj.provenance if (hasattr(obj, "provenance") and isinstance(obj.provenance, dict)) else {}
         pay = obj.payload if (hasattr(obj, "payload") and isinstance(obj.payload, dict)) else {}
 

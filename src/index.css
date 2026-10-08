@@ -1,4 +1,13 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Connected production panels follow the existing appearance control. */
+.workspace-light :is(section, article, details, pre, input, textarea, select) {
+  background-color: #fff;
+  color: #0f172a;
+  border-color: #cbd5e1;
+}
+.workspace-light :is(.text-slate-400, .text-slate-500) { color: #475569; }
 
 @layer base {
   :root {

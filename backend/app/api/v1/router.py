@@ -4,6 +4,8 @@ Aggregates all API v1 domain endpoint routers.
 """
 
 from fastapi import APIRouter
+from app.api.v1.endpoints import worker_audio
+from app.api.v1.endpoints import workspace
 
 from app.api.v1.endpoints import (
     action_items,
@@ -24,6 +26,8 @@ from app.api.v1.endpoints import (
 )
 
 api_v1_router = APIRouter()
+api_v1_router.include_router(worker_audio.router)
+api_v1_router.include_router(workspace.router)
 
 # Register auth endpoints
 api_v1_router.include_router(auth.router)

@@ -5,6 +5,8 @@ vector upsertion with rich metadata, semantic search with multi-attribute filter
 """
 
 import hashlib
+import asyncio
+import threading
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -25,6 +27,7 @@ class SemanticIndexer:
     Ensures consistency where PostgreSQL is authoritative and Qdrant is the semantic search index.
     """
     _real_models = {}
+    _embedding_lock = threading.Lock()
 
     def __init__(
         self,
@@ -61,6 +64,12 @@ class SemanticIndexer:
                 raise
 
     def generate_embedding(self, text: str) -> List[float]:
+        # Model loading and inference are serialized per process, outside the
+        # API event loop. Concurrent first searches must not load duplicates.
+        with self._embedding_lock:
+            return self._generate_embedding(text)
+
+    def _generate_embedding(self, text: str) -> List[float]:
         """
         Generate a deterministic embedding vector for given text.
         Produces a normalized vector of dimension `vector_size` based on text features
@@ -122,7 +131,7 @@ class SemanticIndexer:
             await self.ensure_collection()
 
             text_to_embed = f"{obj.title or ''} {obj.content}".strip()
-            vector = self.generate_embedding(text_to_embed)
+            vector = await asyncio.to_thread(self.generate_embedding, text_to_embed)
 
             point_id = str(obj.knowledge_id)
             lifecycle_val = obj.lifecycle_state.value if hasattr(obj.lifecycle_state, "value") else str(obj.lifecycle_state)
@@ -138,7 +147,7 @@ class SemanticIndexer:
                 "title": obj.title,
                 "content": obj.content,
                 "timestamp": obj.created_at.isoformat() if obj.created_at else datetime.utcnow().isoformat(),
-                "metadata": obj.metadata if (hasattr(obj, "metadata") and isinstance(obj.metadata, dict)) else {},
+                "metadata": getattr(obj, "knowledge_metadata", None) or (obj.metadata if isinstance(getattr(obj, "metadata", None), dict) else {}),
                 "provenance": obj.provenance if (hasattr(obj, "provenance") and isinstance(obj.provenance, dict)) else {},
             }
             from app.core.config import get_settings
@@ -208,7 +217,7 @@ class SemanticIndexer:
         client = await self._get_client()
         await self.ensure_collection()
 
-        query_vector = self.generate_embedding(query)
+        query_vector = await asyncio.to_thread(self.generate_embedding, query)
 
         must_conditions = []
         if meeting_id:
@@ -239,6 +248,20 @@ class SemanticIndexer:
         query_filter = models.Filter(must=must_conditions) if must_conditions else None
 
         try:
+            # Qdrant strict mode requires payload indexes for filtered fields.
+            # Add only missing indexes, retaining the collection and its vectors.
+            from app.core.config import get_settings
+            if get_settings().EXECUTION_MODE.upper() == "REAL":
+                must_conditions.append(models.FieldCondition(key="embedding_model", match=models.MatchValue(
+                    value=get_settings().SEMANTIC_EMBEDDING_MODEL_ID)))
+                query_filter = models.Filter(must=must_conditions)
+            collection = await client.get_collection(self.collection_name)
+            for condition in must_conditions:
+                if condition.key not in collection.payload_schema:
+                    schema = (models.PayloadSchemaType.FLOAT if condition.key == "confidence" else
+                              models.PayloadSchemaType.INTEGER if condition.key == "version" else models.PayloadSchemaType.KEYWORD)
+                    await client.create_payload_index(collection_name=self.collection_name,
+                        field_name=condition.key, field_schema=schema, wait=True)
             response = await client.query_points(
                 collection_name=self.collection_name,
                 query=query_vector,
@@ -263,5 +286,10 @@ class SemanticIndexer:
                     "payload": payload,
                 })
             return results
-        except Exception:
+        except Exception as exc:
+            from app.core.config import get_settings
+            if get_settings().EXECUTION_MODE.upper() == "REAL":
+                from app.cli import sanitize_error_text
+                from fastapi import HTTPException
+                raise HTTPException(503, "Qdrant semantic search failed: " + sanitize_error_text(str(exc))) from exc
             return []

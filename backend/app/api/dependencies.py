@@ -5,7 +5,9 @@ Provides authentication, RBAC, and request context verification dependencies.
 
 from typing import Any, Dict, Optional
 import uuid
-from fastapi import Header, HTTPException, status
+import secrets
+from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.exceptions import UnauthorizedException
@@ -17,6 +19,7 @@ async def verify_authentication(
     authorization: Optional[str] = Header(default=None),
     x_api_key: Optional[str] = Header(default=None),
     x_tenant_id: Optional[str] = Header(default=None),
+    db: AsyncSession = Depends(get_async_db),
 ) -> Dict[str, Any]:
     """
     Verify authentication credentials via cryptographic JWT verification, configurable API keys,
@@ -51,8 +54,19 @@ async def verify_authentication(
             user_id = payload.get("sub") or payload.get("user_id") or "00000000-0000-0000-0000-000000000001"
             role = payload.get("role", "member")
             # Prefer token-embedded tenant claim over unverified header
-            tenant_id = payload.get("tenant_id") or x_tenant_id or "tenant-default"
+            tenant_id = payload.get("tenant_id") or x_tenant_id or "default-tenant"
             email = payload.get("email")
+            if settings.EXECUTION_MODE.upper() == "REAL":
+                from app.models.user import User
+                if not payload.get("sub") or not payload.get("tenant_id") or not payload.get("exp"):
+                    raise UnauthorizedException(message="Signed subject, tenant and expiration are required", code="INVALID_CLAIMS")
+                if x_tenant_id and x_tenant_id != tenant_id:
+                    raise UnauthorizedException(message="Tenant header differs from the signed session", code="INVALID_TENANT")
+                user = await db.get(User, uuid.UUID(str(user_id)))
+                if not user or not user.is_active:
+                    raise UnauthorizedException(message="Account is unavailable or inactive", code="INVALID_ACCOUNT")
+                # An old session must not retain permissions after a role change.
+                role, email = user.role, user.email
 
             return {
                 "user_id": user_id,
@@ -74,10 +88,27 @@ async def verify_authentication(
     # 2. Configured Production API Keys
     configured_api_keys = set(settings.AUTH_API_KEYS)
     incoming_key = x_api_key or token
-    if incoming_key and incoming_key in configured_api_keys:
+    if incoming_key and any(secrets.compare_digest(incoming_key, configured) for configured in configured_api_keys):
+        if settings.EXECUTION_MODE.upper() == "REAL":
+            from sqlalchemy import select
+            from app.models.user import User
+            from app.repositories.user_repo import UserRepository
+            tenant_id = settings.AUTH_API_KEY_TENANT_ID
+            try:
+                principal_id = uuid.UUID(settings.AUTH_API_KEY_USER_ID or "")
+            except ValueError:
+                raise UnauthorizedException(message="API key has no configured account binding", code="INVALID_ACCOUNT") from None
+            if not tenant_id or (x_tenant_id and x_tenant_id != tenant_id):
+                raise UnauthorizedException(message="API key tenant binding is missing or mismatched", code="INVALID_TENANT")
+            principal = (await db.execute(select(User).where(User.id == principal_id,
+                UserRepository.tenant_membership(tenant_id)))).scalar_one_or_none()
+            if principal is None or not principal.is_active:
+                raise UnauthorizedException(message="API key account is unavailable in this tenant", code="INVALID_ACCOUNT")
+            return {"user_id": str(principal.id), "tenant_id": tenant_id, "role": principal.role,
+                    "email": principal.email, "authenticated": True, "token": incoming_key}
         return {
             "user_id": "00000000-0000-0000-0000-000000000001",
-            "tenant_id": x_tenant_id or "tenant-default",
+            "tenant_id": x_tenant_id or "default-tenant",
             "role": "admin",
             "authenticated": True,
             "token": incoming_key,
@@ -97,7 +128,7 @@ async def verify_authentication(
     test_api_keys = {"skw-secret-api-key", "test-api-key", "admin-api-key"}
 
     if (token in test_tokens) or (incoming_key in test_api_keys):
-        if not settings.test_tokens_enabled:
+        if settings.EXECUTION_MODE.upper() == "REAL" or not settings.test_tokens_enabled:
             raise UnauthorizedException(
                 message="Test fixture credentials are not permitted in production environment",
                 code="INVALID_CREDENTIALS",
@@ -110,7 +141,7 @@ async def verify_authentication(
 
         return {
             "user_id": user_id,
-            "tenant_id": x_tenant_id or "tenant-default",
+            "tenant_id": x_tenant_id or "default-tenant",
             "role": role,
             "authenticated": True,
             "token": token or incoming_key,

@@ -126,7 +126,7 @@ class KnowledgeQueryEngine:
         3. Combine results, normalize/score, deduplicate, rank by semantic similarity + confidence, and filter.
         4. Return enriched Knowledge Object dictionaries (never raw Qdrant records).
         """
-        cache_key = f"hybrid_query:{hash(query)}:{meeting_id}:{object_type}:{source_module}:{min_confidence}:{version}:{lifecycle_state}:{limit}"
+        cache_key = f"hybrid_query_v2:{hash(query)}:{meeting_id}:{object_type}:{source_module}:{min_confidence}:{version}:{lifecycle_state}:{limit}"
         cached = await self._get_cache(cache_key)
         if cached is not None:
             return cached
@@ -162,9 +162,9 @@ class KnowledgeQueryEngine:
         for hit in semantic_hits:
             kid = str(hit.get("knowledge_id"))
             score = hit.get("score", 0.0)
-            confidence = hit.get("confidence") or 0.5
+            confidence = hit.get("confidence")
             # Combined ranking formula: 70% semantic score + 30% confidence score
-            combined_score = (0.7 * score) + (0.3 * confidence)
+            combined_score = score if confidence is None else (0.7 * score) + (0.3 * confidence)
 
             fused_map[kid] = {
                 "knowledge_id": kid,
@@ -186,7 +186,7 @@ class KnowledgeQueryEngine:
         # Process structured hits not in semantic
         for kid, obj in structured_map.items():
             if kid not in fused_map:
-                confidence = obj.confidence or 0.5
+                confidence = obj.confidence
                 fused_map[kid] = {
                     "knowledge_id": str(obj.id),
                     "meeting_id": str(obj.meeting_id),
@@ -200,7 +200,7 @@ class KnowledgeQueryEngine:
                     "provenance": obj.provenance if isinstance(obj.provenance, dict) else {},
                     "metadata": obj.payload.get("metadata", {}) if (obj.payload and isinstance(obj.payload, dict)) else {},
                     "payload": obj.payload if isinstance(obj.payload, dict) else {},
-                    "relevance_score": 0.5 * confidence, # base score for structured-only match
+                    "relevance_score": 0.0 if confidence is None else 0.5 * confidence, # base score for structured-only match
                     "retrieval_source": "hybrid_structured",
                 }
 

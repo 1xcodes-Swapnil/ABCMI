@@ -791,6 +791,10 @@ class PlatformProviderRegistry:
         self._providers[provider.provider_name] = provider
 
     def get(self, provider_name: str) -> PlatformIntegrationProvider:
+        from app.core.config import get_settings
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            from fastapi import HTTPException
+            raise HTTPException(503, "External meeting adapters are not implemented for REAL execution. Use local audio upload or live capture.")
         normalized = provider_name.lower().replace("-", "_")
         provider = self._providers.get(provider_name) or self._providers.get(normalized)
         if not provider:

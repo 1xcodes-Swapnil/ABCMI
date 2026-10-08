@@ -147,6 +147,10 @@ class AIModuleRunner:
                     if not transcript:
                         raise ValueError("REAL meeting understanding requires the actual transcript")
                     context = upstream.get("context_intelligence", {}).get("metadata", {})
+                    context = {**context, "turns": [{"segment_id": str(s["segment_id"]),
+                        "text": s["transcript"], "start_ms": s["start_time"] * 1000,
+                        "end_ms": s["end_time"] * 1000, "speaker": s.get("speaker_id")}
+                        for s in upstream.get("multilingual_asr", {}).get("segments", [])]}
                     result = await MeetingUnderstandingEngine().analyze_meeting(uuid.UUID(str(meeting_id)),
                         transcript, context_data=context, correlation_id=correlation_id, use_fixture=False)
                     return {"status": "SUCCESS", "capability": cap, "confidence_score": result.overall_confidence,
@@ -193,7 +197,8 @@ class AIModuleRunner:
                         raise ValueError("REAL transcript intelligence requires actual ASR segments")
                     asr_result = ASRResult(meeting_id=uuid.UUID(str(meeting_id)),
                         full_transcript=asr["transcript"], segments=segments, overall_confidence=None,
-                        metadata={"model_name": settings.OPENMOSS_MODEL_ID, "provenance": "REAL MOSS"})
+                        metadata={**asr.get("metadata", {}), "model_name": settings.OPENMOSS_MODEL_ID,
+                                  "provenance": "REAL MOSS"})
                     result = await TranscriptIntelligenceEngine().process_transcript(asr_result, correlation_id=correlation_id)
                     if not result.cleaned_segments:
                         raise ValueError("REAL transcript intelligence produced no segments")
@@ -258,12 +263,18 @@ class AIModuleRunner:
                     import os
                     base_path = Path(settings.AUDIO_STORAGE_PATH).resolve()
                     raw_dir = base_path / "raw"
-                    audio_payload = None
-                    if raw_dir.exists():
+                    audio_payload = input_data.get("audio_payload") or input_data.get("audio_bytes")
+                    audio_file_path = input_data.get("audio_file_path")
+                    if audio_file_path:
+                        source = Path(audio_file_path).resolve()
+                        if not source.is_relative_to(base_path) or not source.is_file():
+                            raise ValueError("Stored audio path is outside configured storage or unavailable")
+                        audio_file_path = str(source)
+                    if not audio_payload and not audio_file_path and raw_dir.exists():
                         prefix = f"{meeting_id}_"
                         for file in os.listdir(raw_dir):
                             if file.startswith(prefix):
-                                audio_payload = (raw_dir / file).read_bytes()
+                                audio_file_path = str(raw_dir / file)
                                 break
                     
                     if not audio_payload:
@@ -273,13 +284,15 @@ class AIModuleRunner:
                             audio_payload = input_data["audio_bytes"]
 
                     if cap == "audio_intelligence":
-                        if not audio_payload:
+                        if not audio_payload and not audio_file_path:
                             raise FileNotFoundError(f"No audio file found for meeting {meeting_id} on disk.")
                         from app.ai.multilingual_asr import validate_audio
                         import tempfile
-                        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                            tmp.write(audio_payload)
-                            tmp_path = tmp.name
+                        tmp_path = audio_file_path
+                        if not tmp_path:
+                            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                                tmp.write(audio_payload)
+                                tmp_path = tmp.name
                         try:
                             meta = validate_audio(tmp_path)
                             return {
@@ -295,11 +308,11 @@ class AIModuleRunner:
                                 "correlation_id": correlation_id,
                             }
                         finally:
-                            if os.path.exists(tmp_path):
+                            if not audio_file_path and os.path.exists(tmp_path):
                                 os.remove(tmp_path)
 
                     elif cap == "multilingual_asr":
-                        if not audio_payload:
+                        if not audio_payload and not audio_file_path:
                             raise FileNotFoundError(f"No audio file found for meeting {meeting_id} on disk.")
                         from app.ai.multilingual_asr import MultilingualASREngine
                         engine = MultilingualASREngine()
@@ -308,7 +321,8 @@ class AIModuleRunner:
                             meeting_id=uuid.UUID(meeting_id) if isinstance(meeting_id, str) else meeting_id,
                             target_languages=input_data.get("target_languages"),
                             correlation_id=correlation_id,
-                            use_fixture=False
+                            use_fixture=False,
+                            audio_file_path=audio_file_path,
                         )
                         return {
                             "status": "SUCCESS",
@@ -326,7 +340,7 @@ class AIModuleRunner:
                         }
 
                     elif cap == "speaker_representation":
-                        if not audio_payload:
+                        if not audio_payload and not audio_file_path:
                             raise FileNotFoundError(f"No audio file found for meeting {meeting_id} on disk.")
                         from app.ai.speaker_diarization import SpeakerDiarizationEngine
                         engine = SpeakerDiarizationEngine()
@@ -334,7 +348,8 @@ class AIModuleRunner:
                             audio_payload=audio_payload,
                             meeting_id=uuid.UUID(meeting_id) if isinstance(meeting_id, str) else meeting_id,
                             expected_speakers=input_data.get("expected_speakers"),
-                            correlation_id=correlation_id
+                            correlation_id=correlation_id,
+                            audio_file_path=audio_file_path,
                         )
                         return {
                             "status": "SUCCESS",

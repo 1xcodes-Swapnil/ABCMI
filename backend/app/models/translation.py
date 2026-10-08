@@ -37,7 +37,7 @@ class DerivedTranslation(BaseModel):
     target_language: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
     original_text: Mapped[str] = mapped_column(Text, nullable=False)
     translated_text: Mapped[str] = mapped_column(Text, nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     is_low_confidence: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     requires_verification: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="active", index=True)

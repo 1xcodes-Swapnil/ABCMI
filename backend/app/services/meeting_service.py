@@ -74,6 +74,12 @@ class MeetingService:
         if not auth_context:
             return
 
+        from app.core.config import get_settings
+        if get_settings().EXECUTION_MODE.upper() == "REAL" and (
+            not auth_context.get("tenant_id") or str(auth_context["tenant_id"]) != str(meeting.tenant_id)
+        ):
+            raise ForbiddenException(message="Meeting tenant does not match authenticated identity", code="MEETING_SCOPE_FORBIDDEN")
+
         role = auth_context.get("role")
         if role == "admin":
             return
@@ -182,12 +188,14 @@ class MeetingService:
     ) -> List[Meeting]:
         """List meetings with optional filtering."""
         filters: Dict[str, Any] = {}
+        if auth_context:
+            filters["tenant_id"] = auth_context.get("tenant_id")
         if status:
             filters["status"] = status
 
         if auth_context and auth_context.get("role") != "admin" and auth_context.get("user_id"):
             try:
-                filters["host_id"] = uuid.UUID(auth_context["user_id"])
+                filters["viewer_id"] = uuid.UUID(auth_context["user_id"])
             except ValueError:
                 pass
 
@@ -207,7 +215,7 @@ class MeetingService:
         meeting = await self.get_meeting(meeting_id, auth_context)
 
         # File payload validation
-        if not content or len(content) == 0:
+        if content is None or (isinstance(content, bytes) and len(content) == 0):
             raise BadRequestException(
                 message="Audio upload payload cannot be empty (0 bytes).",
                 code="EMPTY_AUDIO_PAYLOAD",
@@ -220,14 +228,49 @@ class MeetingService:
                 code="UNSUPPORTED_AUDIO_FORMAT",
             )
 
+        duration_seconds = None
+        import io
+        audio_source = io.BytesIO(content) if isinstance(content, bytes) else content
+        audio_source.seek(0)
+        audio_source.seek(0, 2)
+        content_size = audio_source.tell()
+        audio_source.seek(0)
+        from app.core.config import get_settings
+        if content_size > get_settings().MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+            raise BadRequestException(message="Audio exceeds configured upload size limit", code="AUDIO_TOO_LARGE")
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            try:
+                import soundfile as sf
+                info = sf.info(audio_source)
+                sample_rate, channels, duration_seconds = info.samplerate, info.channels, info.duration
+                if info.frames <= 0:
+                    raise ValueError("Audio contains no frames")
+            except Exception:
+                try:
+                    import av
+                    audio_source.seek(0)
+                    with av.open(audio_source) as container:
+                        stream = next(iter(container.streams.audio), None)
+                        if stream is None:
+                            raise ValueError("No audio stream")
+                        sample_rate, channels = stream.codec_context.sample_rate, stream.codec_context.channels
+                        if stream.duration is not None:
+                            duration_seconds = float(stream.duration * stream.time_base)
+                        if not sample_rate or not channels:
+                            raise ValueError("Invalid audio metadata")
+                except Exception as exc:
+                    raise BadRequestException(message="Audio cannot be decoded as a supported real recording", code="INVALID_AUDIO") from exc
+
         storage_mgr = get_storage_manager()
-        saved_path = storage_mgr.save_audio_file(meeting.id, file_name, content)
+        import asyncio
+        saved_path = await asyncio.to_thread(storage_mgr.save_audio_file, meeting.id, file_name, content)
 
         audio = Audio(
             meeting_id=meeting.id,
             file_path=str(saved_path),
             file_name=file_name,
-            file_size_bytes=len(content),
+            file_size_bytes=content_size,
+            duration_seconds=duration_seconds,
             format=clean_format,
             sample_rate=sample_rate,
             channels=channels,
@@ -328,6 +371,7 @@ class MeetingService:
         outputs = {task.required_capability: task.metadata for task in blackboard.list_tasks()
                    if getattr(task.status, "value", task.status) == "COMPLETED"}
         asr = outputs.get("multilingual_asr", {})
+        overlap = outputs.get("overlap_resolution", {})
         if asr.get("metadata", {}).get("is_fixture") is not False:
             raise RuntimeError("REAL persistence requires actual non-fixture ASR provenance")
         segments = [ASRSegment.model_validate(s) for s in asr.get("segments", [])]
@@ -374,7 +418,9 @@ class MeetingService:
                 language="und", confidence_score=None, word_count=len(full_text.split()), is_final=True,
                 provenance={"execution_mode": "REAL", "correlation_id": correlation_id,
                     "model": asr.get("metadata", {}), "speaker_comparison": comparison,
-                    "speaker_mapping": mapping, "deduplicated_segments": removed}))
+                    "speaker_mapping": mapping, "deduplicated_segments": removed,
+                    "overlap_resolution": overlap,
+                    "quality_warnings": overlap.get("warnings", [])}))
         meeting.settings = {**(meeting.settings or {}), "audio_duration_seconds": duration}
         await self.db.commit()
         # A separate identity map/transaction proves committed storage, not the
@@ -385,9 +431,13 @@ class MeetingService:
             signature = [(s.start_time_ms, s.end_time_ms, s.original_text, s.speaker_label) for s in read_segments]
             if signature != expected or not read_transcript or read_transcript.full_text != full_text:
                 raise RuntimeError("REAL committed transcript read-back differs from the final result")
+            if canonical.provenance != read_transcript.provenance:
+                raise RuntimeError("REAL committed transcript provenance read-back differs")
         blackboard.execution_state["transcript_persistence"] = {"segments_written": len(expected),
             "commit": "passed", "read_back": "passed", "canonical_transcript_id": str(canonical.id),
-            "chunk_count": chunk_count, "deduplicated_segments": removed, "speaker_comparison": comparison}
+            "chunk_count": chunk_count, "deduplicated_segments": removed, "speaker_comparison": comparison,
+            "overlap_resolution": (canonical.provenance or {}).get("overlap_resolution", {}),
+            "quality_warnings": (canonical.provenance or {}).get("quality_warnings", [])}
 
     async def schedule_meeting(
         self,

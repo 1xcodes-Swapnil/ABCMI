@@ -13,6 +13,7 @@ from app.models.audit_log import AuditLog
 from app.models.configuration import SystemConfiguration
 from app.models.knowledge_object import KnowledgeObject
 from app.models.live_session import LiveSession, LiveAudioChunk
+from app.models.inference_job import InferenceJob
 from app.models.platform_integration import PlatformConnection, ExternalMeetingReference
 from app.models.report import MeetingReport
 from app.models.translation import DerivedTranslation

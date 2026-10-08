@@ -69,14 +69,15 @@ class ReportGenerationService:
 
         try:
             # Fetch authoritative meeting
-            meeting = await self.meeting_repo.get_by_id(meeting_id)
+            from app.services.meeting_service import MeetingService
+            meeting = await MeetingService(self.db).get_meeting(meeting_id, auth_context)
             if not meeting:
                 raise NotFoundException(message=f"Meeting {meeting_id} not found", code="MEETING_NOT_FOUND")
 
             # Fetch participants
             participants_list = []
             if hasattr(meeting, "participants") and meeting.participants:
-                participants_list = [{"id": str(p.id), "name": getattr(p, "name", "Participant"), "role": getattr(p, "role", "attendee")} for p in meeting.participants]
+                participants_list = [{"id": str(p.id), "name": p.display_name, "role": getattr(p, "role", "attendee")} for p in meeting.participants]
 
             # Fetch knowledge objects / SKW data for meeting
             knowledge_objects = await self.knowledge_repo.get_by_meeting(meeting_id)
@@ -87,20 +88,24 @@ class ReportGenerationService:
             facts = []
             hypotheses = []
             transcript_insights = []
+            summaries = []
             confidence_statuses = []
 
             for ko in knowledge_objects:
                 item = {
                     "id": str(ko.id),
-                    "type": getattr(ko, "knowledge_type", "general"),
+                    "type": ko.object_type,
                     "title": getattr(ko, "title", ""),
                     "content": getattr(ko, "content", ""),
-                    "confidence": getattr(ko, "confidence", 1.0),
+                    "confidence": ko.confidence,
+                    "requires_verification": (ko.payload or {}).get("requires_verification", True),
                     "verification_status": getattr(ko, "status", "active"),
                     "version": getattr(ko, "version", 1),
                 }
-                k_type = str(ko.knowledge_type).lower() if hasattr(ko, "knowledge_type") else ""
-                if "topic" in k_type:
+                k_type = str(ko.object_type).lower()
+                if k_type == "summary":
+                    summaries.append(item)
+                elif "topic" in k_type:
                     topics.append(item)
                 elif "decision" in k_type:
                     decisions.append(item)
@@ -127,48 +132,55 @@ class ReportGenerationService:
                 {
                     "title": "Meeting Metadata",
                     "content": f"Title: {meeting.title}\nStatus: {meeting.status}\nScheduled: {meeting.scheduled_start}\nDuration: {meeting.duration_minutes} mins\nTimezone: {meeting.timezone}",
-                    "confidence": 1.0,
-                    "verification_status": "verified",
+                    "confidence": None,
+                    "verification_status": "recorded",
                     "metadata": {"language": meeting.language},
                 },
                 {
                     "title": "Participants",
-                    "content": json.dumps(participants_list, indent=2),
-                    "confidence": 1.0,
-                    "verification_status": "verified",
+                    "content": json.dumps(participants_list, indent=2, ensure_ascii=False),
+                    "confidence": None,
+                    "verification_status": "recorded",
                     "metadata": {"count": len(participants_list)},
                 },
                 {
+                    "title": "Meeting Summary",
+                    "content": json.dumps(summaries, indent=2, ensure_ascii=False),
+                    "confidence": None,
+                    "verification_status": "see individual source review status",
+                    "metadata": {"count": len(summaries)},
+                },
+                {
                     "title": "Topics Discussed",
-                    "content": json.dumps(topics, indent=2),
+                    "content": json.dumps(topics, indent=2, ensure_ascii=False),
                     "confidence": avg_confidence,
-                    "verification_status": "authoritative",
+                    "verification_status": "see individual source review status",
                     "metadata": {"count": len(topics)},
                 },
                 {
                     "title": "Key Decisions",
-                    "content": json.dumps(decisions, indent=2),
+                    "content": json.dumps(decisions, indent=2, ensure_ascii=False),
                     "confidence": avg_confidence,
-                    "verification_status": "verified",
+                    "verification_status": "see individual source review status",
                     "metadata": {"count": len(decisions)},
                 },
                 {
                     "title": "Action Items",
-                    "content": json.dumps(action_items, indent=2),
+                    "content": json.dumps(action_items, indent=2, ensure_ascii=False),
                     "confidence": avg_confidence,
-                    "verification_status": "authoritative",
+                    "verification_status": "see individual source review status",
                     "metadata": {"count": len(action_items)},
                 },
                 {
-                    "title": "Verified Facts & Hypotheses",
-                    "content": json.dumps({"facts": facts, "hypotheses": hypotheses}, indent=2),
+                    "title": "Facts & Hypotheses",
+                    "content": json.dumps({"facts": facts, "hypotheses": hypotheses}, indent=2, ensure_ascii=False),
                     "confidence": avg_confidence,
                     "verification_status": "mixed",
                     "metadata": {"facts_count": len(facts), "hypotheses_count": len(hypotheses)},
                 },
                 {
                     "title": "Transcript Insights & Speaker Analytics",
-                    "content": json.dumps(transcript_insights, indent=2),
+                    "content": json.dumps(transcript_insights, indent=2, ensure_ascii=False),
                     "confidence": avg_confidence,
                     "verification_status": "derived",
                     "metadata": {"insights_count": len(transcript_insights), "speaker_analytics_enabled": include_analytics},
@@ -314,6 +326,29 @@ class ReportGenerationService:
             content = "\n".join(lines).encode("utf-8")
             return content, f"report_{meeting_id}_{report_id}.txt"
 
+        elif fmt == "html":
+            from html import escape
+            sections = []
+            for section in payload["sections"]:
+                content = section.get("content", "")
+                try:
+                    content = json.dumps(json.loads(content), ensure_ascii=False, indent=2)
+                except (ValueError, TypeError):
+                    content = str(content)
+                sections.append("<section><h2>" + escape(str(section["title"])) + "</h2><p class='status'>"
+                    + escape(str(section.get("verification_status") or "Review status not available"))
+                    + "</p><pre dir='auto'>" + escape(content) + "</pre></section>")
+            document = ("<!doctype html><html><head><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'\">"
+                "<title>ABCI-MI Meeting Report</title><style>body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:1rem;color:#172033}"
+                "h1,h2{break-after:avoid}section{border-top:1px solid #ccc;margin-top:2rem}pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}"
+                ".status{color:#555;font-size:.9rem}@media print{body{margin:0;padding:0;max-width:none}.instructions{display:none}@page{margin:18mm}}</style>"
+                "</head><body><h1>ABCI-MI Meeting Report</h1><p class='instructions'>Use your browser’s Print command to save this multilingual report as PDF.</p>"
+                "<p>Meeting: " + escape(str(meeting_id)) + "<br>Report: " + escape(str(report_id))
+                + "<br>Generated: " + escape(str(payload.get("generated_at", ""))) + "</p>" + "".join(sections) + "</body></html>")
+            return document.encode("utf-8"), f"report_{meeting_id}_{report_id}.html"
+
         elif fmt == "pdf":
             content = self._generate_pdf_document(payload)
             return content, f"report_{meeting_id}_{report_id}.pdf"
@@ -338,7 +373,7 @@ class ReportGenerationService:
             }
             for k, v in replacements.items():
                 text = text.replace(k, v)
-            normalized = unicodedata.normalize("NFKD", text)
+            normalized = unicodedata.normalize("NFC", text)
             safe_chars = []
             for c in normalized:
                 code = ord(c)
@@ -347,7 +382,7 @@ class ReportGenerationService:
                 elif c == "\n":
                     safe_chars.append("\n")
                 else:
-                    safe_chars.append("?")
+                    raise BadRequestException(message="This PDF renderer cannot preserve the source script. Export printable HTML and use browser Print to PDF, or export UTF-8 JSON/Markdown/TXT.", code="PDF_FONT_UNAVAILABLE")
             return "".join(safe_chars)
 
         def escape_pdf(text: str) -> str:
@@ -366,7 +401,9 @@ class ReportGenerationService:
         doc_lines.append(f"Version:      {payload.get('version', 1)}")
         prov = payload.get("provenance", {})
         if prov:
-            doc_lines.append(f"Provenance:   {prov.get('source', 'SKW Blackboard')} (Avg Confidence: {prov.get('average_confidence', 1.0):.2f})")
+            confidence = prov.get('average_confidence')
+            label = f"{confidence:.2f}" if isinstance(confidence, (float, int)) else "not measured"
+            doc_lines.append(f"Provenance:   {prov.get('source', 'SKW Blackboard')} (Avg Confidence: {label})")
         doc_lines.append("--------------------------------------------------------------------------------")
         doc_lines.append("")
 
@@ -400,7 +437,7 @@ class ReportGenerationService:
                             # Knowledge item (Topic, Decision, Action Item, etc.)
                             k_type = item.get("type", "item").upper()
                             k_title = item.get("title") or item.get("content", "")
-                            k_conf = item.get("confidence", 1.0)
+                            k_conf = item.get("confidence")
                             k_conf_str = f"{k_conf:.2f}" if isinstance(k_conf, (int, float)) else str(k_conf)
                             doc_lines.append(f"   * [{k_type}] {k_title}")
                             if item.get("content") and item.get("title") and item.get("content") != item.get("title"):
@@ -581,10 +618,14 @@ class ReportGenerationService:
         report = result.scalars().first()
         if not report:
             raise NotFoundException(message=f"Report {report_id} not found", code="REPORT_NOT_FOUND")
+        from app.services.meeting_service import MeetingService
+        await MeetingService(self.db).get_meeting(report.meeting_id, auth_context)
         return report
 
     async def list_reports_for_meeting(self, meeting_id: uuid.UUID, auth_context: Dict[str, Any]) -> List[MeetingReport]:
         """Lists all reports generated for a meeting."""
+        from app.services.meeting_service import MeetingService
+        await MeetingService(self.db).get_meeting(meeting_id, auth_context)
         stmt = select(MeetingReport).where(MeetingReport.meeting_id == meeting_id)
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
@@ -615,9 +656,7 @@ class ReportGenerationService:
             "report_type": report.report_type,
             "generated_at": report.created_at.isoformat(),
             "version": report.version,
-            "sections": sections or [
-                {"title": "Report Summary", "content": f"Meeting Report for {title}", "confidence": 1.0, "verification_status": "verified"}
-            ],
+            "sections": sections or [],
             "provenance": report.provenance or {},
         }
         file_bytes, filename = self._export_to_format(payload, target_format)

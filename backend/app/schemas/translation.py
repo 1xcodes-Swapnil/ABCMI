@@ -102,7 +102,7 @@ class DerivedTranslationResponse(CoreBaseModel):
     target_language: str
     original_text: str
     translated_text: str
-    confidence: float
+    confidence: Optional[float] = None
     is_low_confidence: bool
     requires_verification: bool
     status: str

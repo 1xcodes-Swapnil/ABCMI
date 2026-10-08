@@ -4,7 +4,8 @@ Provides multi-speaker overlap detection, cross-talk separation, candidate hypot
 and confidence score recalibration.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
+import math
 import uuid
 from pydantic import Field
 
@@ -35,6 +36,9 @@ class OverlapResolutionResult(CoreBaseModel):
     overlapping_segments: List[OverlappingSegment] = Field(default_factory=list)
     resolved_candidates: List[OverlapCandidateHypothesis] = Field(default_factory=list)
     adjusted_confidence: Optional[float] = Field(default=0.88, ge=0.0, le=1.0)
+    resolution_status: Literal["NOT_REQUIRED", "UNRESOLVED", "NOT_VERIFIED"] = "NOT_VERIFIED"
+    separation_verified: bool = False
+    warnings: List[str] = Field(default_factory=list)
 
 
 class OverlapResolutionEngine:
@@ -68,6 +72,11 @@ class OverlapResolutionEngine:
                 raise ValueError("REAL overlap detection requires actual diarization turns")
             def value(turn, key):
                 return turn[key] if isinstance(turn, dict) else getattr(turn, key)
+            for turn in turns:
+                start, end = value(turn, "start_time"), value(turn, "end_time")
+                if not (math.isfinite(start) and math.isfinite(end) and 0 <= start < end
+                        and value(turn, "speaker_id")):
+                    raise ValueError("REAL overlap detection received invalid diarization turns")
             overlaps = []
             for i, first in enumerate(turns):
                 for second in turns[i + 1:]:
@@ -81,10 +90,15 @@ class OverlapResolutionEngine:
                         overlaps.append(OverlappingSegment(start_time=start, end_time=end,
                             primary_speaker=value(first, "speaker_id"), secondary_speaker=value(second, "speaker_id"),
                             overlap_ratio=(end - start) / duration))
-            if overlaps:
-                raise RuntimeError("REAL overlapping speech detected; no separation provider is configured")
-            return OverlapResolutionResult(meeting_id=m_id, overlapping_segments=[],
-                                           resolved_candidates=[], adjusted_confidence=None)
+            # SDD 12.6.15 permits publishing unresolved overlap. Retain observed
+            # intervals; never invent separated audio, hypotheses or confidence.
+            return OverlapResolutionResult(meeting_id=m_id, overlapping_segments=overlaps,
+                resolved_candidates=[], adjusted_confidence=None,
+                resolution_status="UNRESOLVED" if overlaps else "NOT_REQUIRED",
+                separation_verified=False,
+                warnings=["Overlapping speech remains unresolved: no separation provider is configured. "
+                          "The original ASR transcript is preserved; overlapping words and speaker "
+                          "attribution require review."] if overlaps else [])
 
         overlaps = [
             OverlappingSegment(

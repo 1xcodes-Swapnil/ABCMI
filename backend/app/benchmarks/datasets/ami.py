@@ -254,118 +254,52 @@ class AMIDatasetAdapter(BaseDatasetAdapter):
                     })
         return turns
 
-    def locate_or_download_samples(
-        self,
-        target_dir: str,
-        max_samples: int = 5,
-        language: str = "en",
-        split: str = "test",
-    ) -> List[BenchmarkSample]:
-        """
-        Locate local AMI dataset or download real meetings from official Edinburgh mirror.
-        """
-        # Resolve dataset root: check env override or default target_dir
-        ami_dir = os.getenv("AMI_DATASET_ROOT") or os.path.join(target_dir, "ami")
-        os.makedirs(ami_dir, exist_ok=True)
-        samples: List[BenchmarkSample] = []
-
-        sample_keys = list(self.OFFICIAL_SAMPLES.keys())[:max_samples]
-        for s_key in sample_keys:
-            meta = self.OFFICIAL_SAMPLES[s_key]
-            audio_path = os.path.join(ami_dir, f"{s_key}.wav")
-            if not os.path.exists(audio_path):
-                # Also check alternative names like {s_key}.Mix-Headset.wav
-                alt_path = os.path.join(ami_dir, f"{s_key}.Mix-Headset.wav")
-                if os.path.exists(alt_path):
-                    audio_path = alt_path
-
-            meta_path = os.path.join(ami_dir, f"{s_key}_annotation.json")
-            rttm_path = os.path.join(ami_dir, f"{s_key}.rttm")
-
-            # Download real audio from official Edinburgh mirror if absent
-            if not os.path.exists(audio_path):
-                official_url = meta["official_audio_url"]
-                try:
-                    req = urllib.request.Request(
-                        official_url,
-                        headers={"User-Agent": "Mozilla/5.0 (ABCI-MI Benchmark Framework/1.0)"},
-                    )
-                    with urllib.request.urlopen(req, timeout=30) as resp, open(audio_path, "wb") as out_f:
-                        while chunk := resp.read(131072):
-                            out_f.write(chunk)
-                except Exception as dl_ex:
-                    # If network download is unavailable in offline environment, raise explicit error
-                    if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
-                        raise MissingAudioError(
-                            dataset_name="AMI",
-                            sample_id=s_key,
-                            expected_path=audio_path,
-                        )
-
-            # Ground truth reference turns
+    def locate_or_download_samples(self, target_dir: str, max_samples: int = 5,
+                                   language: str = "en", split: str = "test") -> List[BenchmarkSample]:
+        """Read existing audio and official timed XML only; never generate references."""
+        from pathlib import Path
+        import xml.etree.ElementTree as ET
+        import soundfile as sf
+        root = Path(os.getenv("AMI_DATASET_ROOT") or os.path.join(target_dir, "ami"))
+        audio_root = Path(os.getenv("AMI_AUDIO_ROOT") or root)
+        candidates = [p for p in audio_root.rglob("*.wav")
+            if next(root.rglob(f"{p.name.split('.')[0]}.*.words.xml"), None) is not None]
+        audio_files = sorted(candidates, key=lambda p: (sf.info(p).duration, p.name))[:max_samples]
+        if not audio_files:
+            raise MissingAudioError(dataset_name=self.name, sample_id="local", expected_path=str(root))
+        samples = []
+        for audio in audio_files:
+            meeting = audio.name.split(".")[0]
+            words = []
+            sources = []
+            for path in sorted(root.rglob(f"{meeting}.*.words.xml")):
+                sources.append(str(path))
+                speaker = path.name.split(".")[1]
+                for node in ET.parse(path).getroot().iter():
+                    if node.tag.split("}")[-1] != "w" or "starttime" not in node.attrib or "endtime" not in node.attrib:
+                        continue
+                    text = "".join(node.itertext()).strip()
+                    if text:
+                        words.append({"start_time": float(node.attrib["starttime"]),
+                            "end_time": float(node.attrib["endtime"]), "speaker": speaker, "text": text})
+            if not words:
+                raise MissingAnnotationsError(dataset_name=self.name, sample_id=meeting, expected_file="Official AMI timed word XML")
+            words.sort(key=lambda w: (w["start_time"], w["end_time"]))
             turns = []
-            if os.path.exists(rttm_path):
-                turns = self._parse_rttm_file(rttm_path)
-            elif os.path.exists(meta_path):
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    ann = json.load(f)
-                    turns = ann.get("turns", [])
-
-            # If RTTM file does not exist, persist standard verified meeting annotations
-            if not turns:
-                dur_chunk = meta["duration"] / (len(meta["speakers"]) * 3)
-                curr_t = 0.0
-                for i in range(len(meta["speakers"]) * 3):
-                    spk = meta["speakers"][i % len(meta["speakers"])]
-                    turns.append({
-                        "speaker": spk,
-                        "start_time": round(curr_t, 2),
-                        "end_time": round(curr_t + dur_chunk * 0.85, 2),
-                        "duration": round(dur_chunk * 0.85, 2),
-                    })
-                    curr_t += dur_chunk
-
-            # Write annotation manifest
-            annotation_data = {
-                "sample_id": s_key,
-                "dataset": "AMI",
-                "version": self.version,
-                "reference_transcript": meta["reference_transcript"],
-                "speakers": meta["speakers"],
-                "topics": meta["topics"],
-                "decisions": meta["decisions"],
-                "turns": turns,
-            }
-            with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump(annotation_data, f, indent=2)
-
-            duration = meta["duration"]
-            if os.path.exists(audio_path):
-                info = self.inspect_audio_file(audio_path)
-                if info.get("is_valid_wave") and info.get("duration_seconds", 0) > 0:
-                    duration = info["duration_seconds"]
-
-            sample = BenchmarkSample(
-                sample_id=s_key,
-                dataset_name=self.name,
-                dataset_version=self.version,
-                audio_path=audio_path,
-                audio_format="wav",
-                duration_seconds=duration,
-                language="en",
-                reference_transcript=meta["reference_transcript"],
-                reference_speaker_turns=turns,
-                reference_segments=[
-                    {"start_time": t["start_time"], "end_time": t["end_time"], "speaker": t["speaker"]}
-                    for t in turns
-                ],
-                reference_topics=meta["topics"],
-                reference_decisions=meta["decisions"],
-                reference_summary=f"AMI Project Meeting {s_key}: Focus on {', '.join(meta['topics'])}.",
-                ground_truth_status="ground_truth_available",
-                metadata={"speakers_count": len(meta["speakers"]), "scenario": "Scenario Meeting"},
-            )
+            for path in sorted(root.rglob(f"{meeting}.*.segments.xml")):
+                sources.append(str(path))
+                speaker = path.name.split(".")[1]
+                for node in ET.parse(path).getroot().iter():
+                    start = node.attrib.get("transcriber_start", node.attrib.get("starttime"))
+                    end = node.attrib.get("transcriber_end", node.attrib.get("endtime"))
+                    if node.tag.split("}")[-1] == "segment" and start is not None and end is not None:
+                        turns.append({"start_time": float(start), "end_time": float(end), "speaker": speaker})
+            info = sf.info(audio)
+            sample = BenchmarkSample(sample_id=meeting, dataset_name=self.name, dataset_version=self.version,
+                audio_path=str(audio), audio_format="wav", duration_seconds=info.duration, language=language,
+                reference_transcript=" ".join(w["text"] for w in words), reference_segments=words,
+                reference_speaker_turns=turns, ground_truth_status="ground_truth_available",
+                metadata={"annotation_sources": sources, "split": "local; official split not verified"})
             sample.compute_sha256()
             samples.append(sample)
-
         return samples

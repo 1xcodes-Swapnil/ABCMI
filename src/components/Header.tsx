@@ -52,7 +52,7 @@ export const Header: React.FC<HeaderProps> = ({
   activeTabTitle = 'Meetings & Audio Intake'
 }) => {
   const unreadCount = notifications.filter(n => !n.read).length;
-  const avatarSrc = auth.avatar_url || '/src/assets/images/workspace_executive_avatar_1790188244518.jpg';
+  const avatarSrc = auth.avatar_url || 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2240%22 height=%2240%22%3E%3Crect width=%2240%22 height=%2240%22 rx=%2220%22 fill=%22%234f46e5%22/%3E%3Ctext x=%2220%22 y=%2226%22 text-anchor=%22middle%22 fill=%22white%22%3EA%3C/text%3E%3C/svg%3E';
 
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [userStatus, setUserStatus] = useState<'online' | 'busy' | 'away'>('online');
@@ -90,7 +90,8 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   const handleCopySessionToken = () => {
-    navigator.clipboard?.writeText(auth.token || 'jwt-bearer-token');
+    if (!auth.token) return;
+    navigator.clipboard?.writeText(auth.token);
     setCopiedToken(true);
     setTimeout(() => setCopiedToken(false), 2000);
   };
@@ -349,34 +350,7 @@ export const Header: React.FC<HeaderProps> = ({
                   </div>
                 </div>
 
-                {/* RBAC Quick Role Switcher */}
-                <div className="p-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                      <Shield className="w-3 h-3 text-indigo-400" />
-                      Switch RBAC Role
-                    </span>
-                    <span className="text-[10px] font-mono text-indigo-400">Live Context</span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {(['admin', 'host', 'security_officer', 'member'] as const).map(r => (
-                      <button
-                        key={r}
-                        type="button"
-                        onClick={() => handleRoleChange(r)}
-                        className={`px-2.5 py-1.5 rounded-lg text-xs text-left font-medium transition-all flex items-center justify-between border ${
-                          auth.role === r
-                            ? 'bg-indigo-50 dark:bg-indigo-950/60 border-indigo-500/60 text-indigo-700 dark:text-indigo-300 ring-1 ring-indigo-500/30'
-                            : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/60'
-                        }`}
-                      >
-                        <span className="capitalize">{r.replace('_', ' ')}</span>
-                        {auth.role === r && <Check className="w-3 h-3 text-indigo-500" />}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
+                <div className="p-3 text-xs text-slate-400">Authorized role: {auth.token ? auth.role : 'not connected'}</div>
                 {/* Core Quick Navigation Actions */}
                 <div className="p-2 space-y-0.5 text-xs">
                   <button
@@ -393,7 +367,7 @@ export const Header: React.FC<HeaderProps> = ({
                         Edit Profile &amp; Settings
                       </div>
                       <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                        Update avatar, bio, department &amp; preferences
+                        Update your persisted display name
                       </div>
                     </div>
                   </button>
@@ -412,7 +386,7 @@ export const Header: React.FC<HeaderProps> = ({
                         Security &amp; Audit Trail
                       </div>
                       <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                        View cryptographic logs &amp; RBAC policies
+                        View persisted audit events &amp; permissions
                       </div>
                     </div>
                   </button>
@@ -442,16 +416,16 @@ export const Header: React.FC<HeaderProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      if (onRefreshSessionToken) onRefreshSessionToken();
+
                       handleCopySessionToken();
                     }}
                     className="w-full flex items-center justify-between px-3 py-1.5 rounded-lg text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white transition-colors"
                   >
                     <span className="flex items-center gap-2">
                       <Key className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>{copiedToken ? 'Token Copied & Refreshed!' : 'Refresh Session Token'}</span>
+                      <span>{copiedToken ? 'Token copied' : 'Copy current session token'}</span>
                     </span>
-                    <span className="text-[10px] font-mono text-slate-400">HS256</span>
+                    <span className="text-[10px] font-mono text-slate-400">Bearer</span>
                   </button>
 
                   <button

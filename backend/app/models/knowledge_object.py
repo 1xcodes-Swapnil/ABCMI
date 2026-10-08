@@ -50,6 +50,16 @@ class KnowledgeObject(BaseModel):
     qdrant_point_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     @property
+    def knowledge_metadata(self) -> dict:
+        """Persist SKW metadata without shadowing SQLAlchemy's reserved metadata."""
+        value = (self.provenance or {}).get("knowledge_metadata", {})
+        return value if isinstance(value, dict) else {}
+
+    @knowledge_metadata.setter
+    def knowledge_metadata(self, value: Optional[dict]) -> None:
+        self.provenance = {**(self.provenance or {}), "knowledge_metadata": dict(value or {})}
+
+    @property
     def knowledge_id(self) -> uuid.UUID:
         return self.id
 

@@ -437,6 +437,7 @@ class MultilingualASREngine:
         force_chunked: bool = False,
         chunk_duration: Optional[float] = None,
         overlap_duration: Optional[float] = None,
+        audio_file_path: Optional[str] = None,
     ) -> ASRResult:
         """
         Transcribes multilingual audio payload into timed segments with language confidence.
@@ -445,7 +446,7 @@ class MultilingualASREngine:
         Automatically switches to LongAudioProcessor when audio duration exceeds AUDIO_CHUNK_THRESHOLD_SECONDS
         or when force_chunked is True.
         """
-        if not audio_payload:
+        if not audio_payload and not audio_file_path:
             raise ValueError("Audio payload cannot be empty.")
 
         langs = target_languages or ["hi", "en", "hinglish"]
@@ -469,15 +470,20 @@ class MultilingualASREngine:
 
         # Save audio payload to a temporary file for validation and processing
         import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp.write(audio_payload)
-            tmp_path = tmp.name
+        owns_temp_file = audio_file_path is None
+        tmp_path = audio_file_path
+        if owns_temp_file:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp.write(audio_payload)
+                tmp_path = tmp.name
 
         try:
             try:
                 audio_meta = validate_audio(tmp_path)
                 duration = audio_meta["duration"]
             except Exception as val_err:
+                if exec_mode == "REAL":
+                    raise ValueError("REAL audio metadata validation failed") from val_err
                 logger.debug(f"Audio metadata validation skipped: {val_err}")
                 duration = 0.0
 
@@ -529,18 +535,19 @@ class MultilingualASREngine:
                     overall_confidence=None,
                     metadata={
                         "correlation_id": correlation_id,
-                        "audio_bytes_length": len(audio_payload),
+                        "audio_bytes_length": len(audio_payload) if audio_payload is not None else os.path.getsize(tmp_path),
                         "model_name": settings.OPENMOSS_MODEL_ID,
                         "model_version": "latest",
                         "provenance": f"ASR:{settings.OPENMOSS_MODEL_ID}:latest",
                         "is_fixture": False,
                         "inference": provider.last_inference,
+                        "raw_moss_output": provider.last_raw_output,
                         "chunk_count": 1,
                         "supported_languages_count": len(self.SUPPORTED_LANGUAGES),
                     },
                 )
         finally:
-            if os.path.exists(tmp_path):
+            if owns_temp_file and os.path.exists(tmp_path):
                 try:
                     os.remove(tmp_path)
                 except Exception:
@@ -767,7 +774,8 @@ class MultilingualASREngine:
                     raise RuntimeError("REAL mode requested but OpenMOSSProvider was not initialized.")
                 segments = await real_provider.transcribe(chunk_path, options={"chunk_meta": chunk_meta})
                 inference_trace.append({"chunk_index": chunk_meta.chunk_index, "start_time": chunk_meta.start_time,
-                    "end_time": chunk_meta.end_time, "segments": len(segments), **real_provider.last_inference})
+                    "end_time": chunk_meta.end_time, "segments": len(segments),
+                    "raw_moss_output": real_provider.last_raw_output, **real_provider.last_inference})
                 return segments
             else:
                 # Simulated chunk transcription for fixture/test mode

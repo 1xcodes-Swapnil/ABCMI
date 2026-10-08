@@ -16,7 +16,7 @@ class QuerySynthesisResult(BaseModel):
     """Result of answer synthesis from retrieved authoritative context."""
     answer: str = Field(..., description="Synthesized grounded answer")
     status: QueryAnswerStatus = Field(..., description="Answer status classification")
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="Overall answer confidence")
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Overall answer confidence")
     is_low_confidence: bool = Field(default=False, description="Whether answer confidence is below threshold (< 0.75)")
     requires_verification: bool = Field(default=False, description="Whether human verification is recommended")
     used_knowledge_ids: List[str] = Field(default_factory=list, description="IDs of knowledge objects referenced")
@@ -120,9 +120,9 @@ class DeterministicQueryAnswerProvider(QueryAnswerProvider):
         used_ids = [str(obj.get("knowledge_id")) for obj in retrieved_objects if obj.get("knowledge_id")]
 
         # Calculate confidence
-        confidences = [obj.get("confidence_score") or obj.get("confidence") or 0.8 for obj in retrieved_objects]
-        avg_confidence = round(sum(confidences) / len(confidences), 3) if confidences else 0.8
-        is_low = avg_confidence < self.CONFIDENCE_THRESHOLD
+        confidences = [obj.get("confidence_score", obj.get("confidence")) for obj in retrieved_objects]
+        avg_confidence = round(sum(confidences) / len(confidences), 3) if confidences and all(c is not None for c in confidences) else None
+        is_low = avg_confidence is None or avg_confidence < self.CONFIDENCE_THRESHOLD
 
         # Check if any object explicitly requires verification
         any_req_verif = any(
@@ -288,6 +288,47 @@ class MockQueryAnswerProvider(QueryAnswerProvider):
         )
 
 
+class GeminiQueryAnswerProvider(QueryAnswerProvider):
+    async def synthesize_answer(self, query, retrieved_objects, context_metadata):
+        from app.ai.gemini_text import GeminiTextProvider
+        from fastapi import HTTPException
+        sources = {str(obj["knowledge_id"]): obj for obj in retrieved_objects if obj.get("knowledge_id") and obj.get("content")}
+        if not sources:
+            return QuerySynthesisResult(answer="No matching source records were found in the authorized scope.",
+                status=QueryAnswerStatus.INSUFFICIENT_CONTEXT, confidence=None, requires_verification=True,
+                provenance={"provider": "gemini", "generation_executed": False, "reason": "no_sources"})
+        result, generation = await GeminiTextProvider().generate_json(
+            "Answer the question using ONLY the supplied authorized records. State uncertainty and disagreements. "
+            "Do not treat draft knowledge as verified truth. Cite the knowledge_id and an exact quote for every source used. "
+            "If the sources cannot answer the question, set insufficient_context=true and say what is missing. "
+            "Never use general world knowledge to invent meeting facts, tasks, participants or dates.",
+            {"question": query, "records": [{"knowledge_id": key, "content": obj["content"],
+                "title": obj.get("title"), "object_type": obj.get("object_type"),
+                "requires_verification": (obj.get("payload") or {}).get("requires_verification", True)} for key,obj in sources.items()]},
+            {"type": "OBJECT", "properties": {"answer": {"type": "STRING"},
+             "insufficient_context": {"type": "BOOLEAN"}, "citations": {"type": "ARRAY", "items": {
+                 "type": "OBJECT", "properties": {"knowledge_id": {"type": "STRING"}, "quote": {"type": "STRING"}},
+                 "required": ["knowledge_id", "quote"]}}}, "required": ["answer", "insufficient_context", "citations"]})
+        if not isinstance(result.get("answer"), str) or not result["answer"].strip() or not isinstance(result.get("insufficient_context"), bool):
+            raise HTTPException(502, "Gemini returned an invalid answer")
+        citations = result.get("citations")
+        if not isinstance(citations, list) or (not citations and not result["insufficient_context"]):
+            raise HTTPException(502, "Gemini answer is missing source citations")
+        used = []
+        for citation in citations:
+            source = sources.get(citation.get("knowledge_id")) if isinstance(citation, dict) else None
+            quote = citation.get("quote") if isinstance(citation, dict) else None
+            if not source or not isinstance(quote, str) or not quote.strip() or quote not in source["content"]:
+                raise HTTPException(502, "Gemini answer citation is not supported by the retrieved source")
+            if citation["knowledge_id"] not in used:
+                used.append(citation["knowledge_id"])
+        return QuerySynthesisResult(answer=result["answer"],
+            status=QueryAnswerStatus.INSUFFICIENT_CONTEXT if result["insufficient_context"] else QueryAnswerStatus.REQUIRES_VERIFICATION,
+            confidence=None, is_low_confidence=True, requires_verification=True, used_knowledge_ids=used,
+            provenance={**generation, "citations": citations, "citation_quotes_validated": True,
+                        "semantic_accuracy": "NOT_VERIFIED"})
+
+
 class QueryProviderRegistry:
     """Registry for managing active QueryAnswerProvider instances."""
 
@@ -302,8 +343,15 @@ class QueryProviderRegistry:
 
     @classmethod
     def get(cls, name: Optional[str] = None) -> QueryAnswerProvider:
+        from app.core.config import get_settings
         target_name = name or cls._default_name
+        if name is None and get_settings().EXECUTION_MODE.upper() == 'REAL' and get_settings().TEXT_AI_PROVIDER.lower() == 'gemini':
+            target_name = 'gemini'
+        if get_settings().EXECUTION_MODE.upper() == 'REAL' and isinstance(cls._providers.get(target_name), MockQueryAnswerProvider):
+            raise RuntimeError('Mock answer providers are prohibited in REAL mode')
         if target_name not in cls._providers:
+            if get_settings().EXECUTION_MODE.upper() == 'REAL':
+                raise RuntimeError('Configured REAL query provider is unavailable')
             # Fallback to deterministic
             if "deterministic" not in cls._providers:
                 cls._providers["deterministic"] = DeterministicQueryAnswerProvider()
@@ -315,6 +363,7 @@ class QueryProviderRegistry:
         cls._providers = {
             "deterministic": DeterministicQueryAnswerProvider(),
             "mock": MockQueryAnswerProvider(),
+            "gemini": GeminiQueryAnswerProvider(),
         }
         cls._default_name = "deterministic"
 

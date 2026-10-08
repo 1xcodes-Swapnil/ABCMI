@@ -70,16 +70,17 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   }, [isOpen, onClose]);
 
   const navItems = [
-    { key: 'meetings', label: 'Meetings & Audio Ingestion', category: 'Core Pipeline', icon: Users, desc: 'Batch audio intake, 500MB upload, chunking' },
-    { key: 'live_stream', label: 'Real-Time Live Stream', category: 'Core Pipeline', icon: Radio, desc: 'WebSocket live transcription & partial diarization' },
+    { key: 'projects', label: 'Projects & Cross-Meeting', category: 'Core Pipeline', icon: Database, desc: 'Manage projects and associated meetings' },
+    { key: 'meetings', label: 'Meetings & Audio Ingestion', category: 'Core Pipeline', icon: Users, desc: 'Upload audio and follow actual processing jobs' },
+    { key: 'live_stream', label: 'Real-Time Live Stream', category: 'Core Pipeline', icon: Radio, desc: 'Microphone capture and real worker captions' },
     { key: 'intelligence', label: 'Multi-Agent Intelligence (ACE)', category: 'Core Pipeline', icon: Sparkles, desc: '13-module blackboard, summary, action items' },
     { key: 'queries', label: 'Ask ABCI-MI (Grounded Q&A)', category: 'Knowledge & Analytics', icon: Search, desc: 'Cross-meeting grounded semantic queries' },
     { key: 'knowledge', label: 'Knowledge Warehouse (SKW)', category: 'Knowledge & Analytics', icon: Database, desc: 'Semantic Knowledge Web, canonical objects' },
-    { key: 'translations', label: 'Translations (17 Locales)', category: 'Knowledge & Analytics', icon: Languages, desc: 'Indic languages, code-switched synthesis' },
+    { key: 'translations', label: 'Translations', category: 'Knowledge & Analytics', icon: Languages, desc: 'Derived translations from configured providers' },
     { key: 'reports', label: 'Reports & Exports', category: 'Governance & Platform', icon: FileText, desc: 'Structured PDF, Markdown & JSON reports' },
     { key: 'benchmarks', label: 'Research & SOTA Benchmarks', category: 'Governance & Platform', icon: Award, desc: 'AMI, VoxConverse & AISHELL WER/DER' },
     { key: 'security', label: 'Security & Audit Governance', category: 'Governance & Platform', icon: ShieldCheck, desc: 'RBAC roles, HS256 tokens, audit ledger' },
-    { key: 'api_console', label: 'API Console (47 Endpoints)', category: 'Governance & Platform', icon: Terminal, desc: 'Interactive REST API tester' },
+    { key: 'api_console', label: 'API Console', category: 'Governance & Platform', icon: Terminal, desc: 'Interactive REST API tester' },
     { key: 'system_health', label: 'System Health & Telemetry', category: 'Governance & Platform', icon: Activity, desc: 'Real-time CPU, memory, latency & subsystem metrics' },
   ];
 

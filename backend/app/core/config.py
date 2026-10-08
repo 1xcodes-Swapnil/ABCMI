@@ -5,9 +5,11 @@ Manages environment variables, infrastructure connection parameters, and runtime
 
 from functools import lru_cache
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import List, Optional, Union
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +39,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"  # development, staging, production, test
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
+    ABCI_RUNTIME_ROOT: Optional[str] = None
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
@@ -71,6 +74,8 @@ class Settings(BaseSettings):
     DATABASE_MAX_OVERFLOW: int = 20
     DATABASE_POOL_TIMEOUT: int = 30
     DATABASE_POOL_RECYCLE: int = 1800
+    DATABASE_CONNECT_TIMEOUT_SECONDS: float = Field(default=15, ge=1, le=120)
+    DATABASE_HEALTH_TIMEOUT_SECONDS: float = Field(default=10, ge=1, le=120)
 
     # Optional explicit overrides
     DATABASE_URL_ASYNC: Optional[str] = None
@@ -145,6 +150,12 @@ class Settings(BaseSettings):
     # AI Pipeline & Model Configuration (Phase 4.26)
     # -------------------------------------------------------------------------
     EXECUTION_MODE: str = "FIXTURE"  # REAL, FIXTURE, MOCK
+    GEMINI_API_KEY: Optional[str] = Field(default=None, repr=False)
+    GEMINI_MODEL: str = "gemini-3.5-flash-lite"
+    TEXT_AI_PROVIDER: str = "disabled"  # Explicit opt-in: gemini sends transcript text to Google.
+    GEMINI_TIMEOUT_SECONDS: float = Field(default=90, ge=1, le=300)
+    GEMINI_MAX_INPUT_CHARACTERS: int = Field(default=120000, ge=1000, le=1000000)
+    GEMINI_MAX_OUTPUT_TOKENS: int = Field(default=8192, ge=256, le=65536)
     OPENMOSS_MODEL_ID: str = "OpenMOSS-Team/MOSS-Transcribe-Diarize"
     OPENMOSS_DEVICE: str = "cpu"  # cpu, cuda, auto
     OPENMOSS_MAX_NEW_TOKENS: int = 5120
@@ -173,6 +184,24 @@ class Settings(BaseSettings):
     AUDIO_CHUNK_THRESHOLD_SECONDS: float = 600.0  # Audio duration threshold to trigger chunking
     AUDIO_CHUNK_CONCURRENCY: int = 1             # Bounded concurrency (default 1 sequential for VRAM safety)
     AUDIO_CHUNK_STATE_DIR: Optional[str] = None
+    # Live capture has a separate, small window; batch settings remain independent.
+    LIVE_CHUNK_SECONDS: float = 8.0
+    LIVE_OVERLAP_SECONDS: float = 3.0
+    LIVE_MAX_PENDING_CHUNKS: int = 6
+    LIVE_MAX_CHUNK_BYTES: int = 4 * 1024 * 1024
+    LIVE_WORKER_LEASE_SECONDS: int = 300
+    LIVE_WORKER_API_URL: Optional[str] = None
+    LIVE_WORKER_TOKEN: Optional[str] = None
+
+    @field_validator("AUDIO_STORAGE_PATH", "AUDIO_CHUNK_STATE_DIR", mode="before")
+    @classmethod
+    def resolve_audio_paths(cls, value):
+        if value is None:
+            return None
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = _BACKEND_ROOT.parent / path
+        return str(path.resolve())
 
     # -------------------------------------------------------------------------
     # Google Workspace & Google Meet Integration Configuration
@@ -222,6 +251,8 @@ class Settings(BaseSettings):
     JWT_AUDIENCE: Optional[str] = None
     ALLOW_TEST_TOKENS: Optional[bool] = None  # If None: True in test/development, False in production/staging
     AUTH_API_KEYS: Union[List[str], str] = []
+    AUTH_API_KEY_USER_ID: Optional[str] = None
+    AUTH_API_KEY_TENANT_ID: Optional[str] = None
 
     @field_validator("AUTH_API_KEYS", mode="before")
     @classmethod
@@ -255,4 +286,21 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     """Cached accessor for application settings."""
-    return Settings()
+    settings = Settings()
+    if settings.ABCI_RUNTIME_ROOT:
+        root = Path(settings.ABCI_RUNTIME_ROOT).expanduser()
+        if not root.is_absolute():
+            root = _BACKEND_ROOT.parent / root
+        root = root.resolve()
+        for key, relative in {
+            "TEMP": "tmp", "TMP": "tmp", "TMPDIR": "tmp",
+            "XDG_CACHE_HOME": "cache", "TORCH_HOME": "cache/torch",
+            "NUMBA_CACHE_DIR": "cache/numba", "MPLCONFIGDIR": "cache/matplotlib",
+            "PIP_CACHE_DIR": "cache/pip", "CUDA_CACHE_PATH": "cache/cuda",
+            "HF_MODULES_CACHE": "cache/huggingface/modules",
+        }.items():
+            directory = root / relative
+            directory.mkdir(parents=True, exist_ok=True)
+            os.environ[key] = str(directory)
+        tempfile.tempdir = str(root / "tmp")
+    return settings

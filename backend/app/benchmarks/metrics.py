@@ -73,6 +73,25 @@ def calculate_wer(reference: str, hypothesis: str) -> Dict[str, Any]:
             "hyp_word_count": h_len,
         }
 
+    if r_len * h_len > 1_000_000:
+        # Avoid quadratic Python matrices for full-meeting transcripts.
+        # Existing RapidFuzz computes exact Levenshtein alignment in native code.
+        from rapidfuzz.distance import Levenshtein
+        counts = {"substitutions": 0, "deletions": 0, "insertions": 0, "correct": 0}
+        for op in Levenshtein.opcodes(ref_words, hyp_words):
+            a, b = op.src_end - op.src_start, op.dest_end - op.dest_start
+            if op.tag == "equal": counts["correct"] += a
+            elif op.tag == "delete": counts["deletions"] += a
+            elif op.tag == "insert": counts["insertions"] += b
+            elif op.tag == "replace":
+                counts["substitutions"] += min(a, b)
+                counts["deletions"] += max(0, a-b)
+                counts["insertions"] += max(0, b-a)
+        errors = sum(counts[k] for k in ("substitutions", "deletions", "insertions"))
+        return {"wer": round(errors / r_len, 6), **counts,
+                "ref_word_count": r_len, "hyp_word_count": h_len,
+                "alignment_implementation": "rapidfuzz exact Levenshtein"}
+
     # DP Matrix: dp[i][j] = (cost, subs, dels, ins)
     dp = [[0] * (h_len + 1) for _ in range(r_len + 1)]
     for i in range(r_len + 1):
@@ -174,6 +193,25 @@ def calculate_cer(reference: str, hypothesis: str, ignore_whitespace: bool = Tru
             "hyp_char_count": h_len,
         }
 
+    if r_len * h_len > 1_000_000:
+        # Avoid quadratic Python matrices for full-meeting transcripts.
+        # Existing RapidFuzz computes exact Levenshtein alignment in native code.
+        from rapidfuzz.distance import Levenshtein
+        counts = {"substitutions": 0, "deletions": 0, "insertions": 0, "correct": 0}
+        for op in Levenshtein.opcodes(ref_chars, hyp_chars):
+            a, b = op.src_end - op.src_start, op.dest_end - op.dest_start
+            if op.tag == "equal": counts["correct"] += a
+            elif op.tag == "delete": counts["deletions"] += a
+            elif op.tag == "insert": counts["insertions"] += b
+            elif op.tag == "replace":
+                counts["substitutions"] += min(a, b)
+                counts["deletions"] += max(0, a-b)
+                counts["insertions"] += max(0, b-a)
+        errors = sum(counts[k] for k in ("substitutions", "deletions", "insertions"))
+        return {"cer": round(errors / r_len, 6), **counts,
+                "ref_char_count": r_len, "hyp_char_count": h_len,
+                "alignment_implementation": "rapidfuzz exact Levenshtein"}
+
     dp = [[0] * (h_len + 1) for _ in range(r_len + 1)]
     for i in range(r_len + 1):
         dp[i][0] = i
@@ -241,6 +279,17 @@ def _hungarian_max_weight_matching(cost_matrix: List[List[float]]) -> List[Tuple
 
     n_rows = len(cost_matrix)
     n_cols = len(cost_matrix[0])
+    # Use the already installed polynomial-time solver for many chunk speakers.
+    # Keep the dependency-free branch for environments without SciPy.
+    try:
+        import numpy as np
+        from scipy.optimize import linear_sum_assignment
+        matrix = np.asarray(cost_matrix, dtype=float)
+        rows, cols = linear_sum_assignment(matrix, maximize=True)
+        return [(int(r), int(c)) for r, c in zip(rows, cols) if matrix[r, c] > 0]
+    except ImportError:
+        if max(n_rows, n_cols) > 10:
+            raise RuntimeError("SciPy is required for large exact speaker matching")
     
     # Greedy with augmenting path for integer/float bipartite maximum matching
     # Since speaker counts in meeting segments are typically <= 10, exact branch & bound is fast and optimal
@@ -331,10 +380,17 @@ def calculate_der(
             collar_intervals.append((max(0.0, t["end_time"] - collar_seconds), t["end_time"] + collar_seconds))
 
     def in_collar(time_s: float) -> bool:
-        for c_start, c_end in collar_intervals:
-            if c_start <= time_s <= c_end:
-                return True
-        return False
+        from bisect import bisect_right
+        index = bisect_right(collar_starts, time_s) - 1
+        return index >= 0 and time_s <= merged_collars[index][1]
+
+    merged_collars = []
+    for start, end in sorted(collar_intervals):
+        if merged_collars and start <= merged_collars[-1][1]:
+            merged_collars[-1] = (merged_collars[-1][0], max(end, merged_collars[-1][1]))
+        else:
+            merged_collars.append((start, end))
+    collar_starts = [start for start, end in merged_collars]
 
     # Discretize timeline in 10ms frames
     step_s = step_ms / 1000.0
