@@ -323,6 +323,7 @@ class AIModuleRunner:
                             correlation_id=correlation_id,
                             use_fixture=False,
                             audio_file_path=audio_file_path,
+                            cancel_check=input_data.get("cancel_check"),
                         )
                         return {
                             "status": "SUCCESS",
@@ -350,6 +351,7 @@ class AIModuleRunner:
                             expected_speakers=input_data.get("expected_speakers"),
                             correlation_id=correlation_id,
                             audio_file_path=audio_file_path,
+                            cancel_check=input_data.get("cancel_check_sync"),
                         )
                         return {
                             "status": "SUCCESS",

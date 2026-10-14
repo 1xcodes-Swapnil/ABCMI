@@ -1,5 +1,6 @@
 """Prepare one small existing real upload for the changed long-audio batch path."""
 import asyncio
+import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -13,9 +14,11 @@ sys.path.insert(0, str(ROOT / "backend"))
 os.environ.update(EXECUTION_MODE="REAL", DEBUG="false", LOG_LEVEL="CRITICAL", HF_HUB_OFFLINE="1")
 
 
-async def main():
+async def main(audio_path=None, max_audio_seconds=60):
     import httpx
-    import soundfile as sf
+    import mimetypes
+    from types import SimpleNamespace
+    from app.ai.multilingual_asr import validate_audio
     from sqlalchemy.ext.asyncio import async_sessionmaker
     from app.infrastructure.database import init_database, close_database_connections
     from app.models.meeting import Meeting
@@ -24,10 +27,13 @@ async def main():
     from app.core.security import create_access_token
     from app.ai.long_audio_processor import LongAudioProcessor
 
-    audio = ROOT / "data/audio/raw/f01d7854-a29a-47b7-8c0f-741e2d1fad46_real_excerpt.wav"
-    info = sf.info(audio)
-    if not 0 < info.duration <= 15:
-        raise RuntimeError("This gate permits only the existing small real recording")
+    audio = (audio_path or ROOT / "data/audio/raw/f01d7854-a29a-47b7-8c0f-741e2d1fad46_real_excerpt.wav").resolve()
+    if not audio.is_relative_to((ROOT / "data/audio/raw").resolve()) or not audio.is_file():
+        raise RuntimeError("Small REAL validation requires an existing authorized raw recording")
+    metadata = validate_audio(str(audio))
+    info = SimpleNamespace(duration=metadata["duration"], samplerate=metadata["sample_rate"], channels=metadata["channels"])
+    if not 0 < info.duration <= max_audio_seconds <= 600:
+        raise RuntimeError("Validation audio exceeds the explicitly selected gate (maximum 600 seconds)")
     settings = get_settings()
     assert settings.EXECUTION_MODE == "REAL"
     planner = LongAudioProcessor()
@@ -58,7 +64,7 @@ async def main():
             response.raise_for_status()
             if response.json()["status"] != "healthy":
                 raise RuntimeError("Required services are unhealthy")
-            response = await client.post("/meetings", json={"title": "REAL bounded batch validation — 10 seconds", "language": "en"})
+            response = await client.post("/meetings", json={"title": f"REAL bounded batch validation — {info.duration:g} seconds", "language": "en"})
             response.raise_for_status()
             meeting = response.json()
             record["meeting_id"] = meeting["id"]
@@ -66,7 +72,8 @@ async def main():
                 json.dump(record, handle, indent=2)
             with audio.open("rb") as source:
                 response = await client.post(f"/meetings/{meeting['id']}/audio",
-                    files={"file": (audio.name, source, "audio/wav")}, data={"format": "wav"})
+                    files={"file": (audio.name, source, mimetypes.guess_type(audio.name)[0] or "application/octet-stream")},
+                    data={"format": audio.suffix.lower().lstrip(".")})
             record["upload"] = {"http_status": response.status_code, "body": response.json()}
             response.raise_for_status()
             stored = Path(response.json()["file_path"])
@@ -86,4 +93,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--audio", type=Path)
+    parser.add_argument("--max-audio-seconds", type=float, default=60,
+                        help="Explicit progressive validation limit, at most 600 seconds; default remains 60")
+    args = parser.parse_args()
+    asyncio.run(main(args.audio, args.max_audio_seconds))

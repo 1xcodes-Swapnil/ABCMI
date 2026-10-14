@@ -22,7 +22,7 @@ class TranscriptSegmentRepository(BaseRepository[TranscriptSegment]):
         self,
         meeting_id: uuid.UUID,
         skip: int = 0,
-        limit: int = 1000,
+        limit: Optional[int] = None,
     ) -> Sequence[TranscriptSegment]:
         """List all transcript segments for a meeting in sequential order."""
         query = (
@@ -30,8 +30,9 @@ class TranscriptSegmentRepository(BaseRepository[TranscriptSegment]):
             .where(TranscriptSegment.meeting_id == meeting_id)
             .order_by(TranscriptSegment.sequence_number.asc())
             .offset(skip)
-            .limit(limit)
         )
+        if limit is not None:
+            query = query.limit(limit)
         result = await self.session.execute(query)
         return result.scalars().all()
 

@@ -21,6 +21,7 @@ from sqlalchemy import create_engine, select, update, exists
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.pool import NullPool
+from sqlalchemy.exc import DBAPIError
 
 from app.core.config import get_settings
 from app.infrastructure.database import init_database, close_database_connections
@@ -30,6 +31,10 @@ from app.models.live_session import LiveAudioChunk, LiveSession
 
 def utcnow():
     return datetime.now(timezone.utc)
+
+
+class QueueConnectionUnavailable(RuntimeError):
+    """Queue polling failed before any model stage was started."""
 
 
 class LiveInferenceWorker:
@@ -44,6 +49,7 @@ class LiveInferenceWorker:
         self.sessions = async_sessionmaker(init_database(), expire_on_commit=False)
         self.provider = None
         self.failure_evidence = None
+        self.cancel_signal = threading.Event()
 
     def release_models(self, capability=None):
         """Release completed stages in this single-job GPU process.
@@ -121,15 +127,18 @@ class LiveInferenceWorker:
             await db.commit()
             return job
 
-    def heartbeat(self, job, stop):
+    def heartbeat(self, job, stop, cancel_signal):
         # Dedicated connection/thread also runs while a model blocks Python's
         # async event loop. No credential or URL is written to output.
         url = make_url(self.settings.async_database_url).set(drivername="postgresql+psycopg2")
         engine = create_engine(url, poolclass=NullPool, connect_args={"connect_timeout": 10})
         try:
-            while not stop.wait(self.settings.LIVE_WORKER_LEASE_SECONDS / 3):
+            while not stop.wait(min(5, self.settings.LIVE_WORKER_LEASE_SECONDS / 3)):
                 try:
                     with engine.begin() as db:
+                        from app.models.meeting import Meeting
+                        if db.execute(select(Meeting.status).where(Meeting.id == job.meeting_id)).scalar_one() == "cancelled":
+                            cancel_signal.set()
                         renewed = db.execute(update(InferenceJob).where(InferenceJob.id == job.id,
                             InferenceJob.lease_token == job.lease_token, InferenceJob.status == "running")
                             .values(lease_until=utcnow() + timedelta(seconds=self.settings.LIVE_WORKER_LEASE_SECONDS)))
@@ -319,12 +328,20 @@ class LiveInferenceWorker:
                     for task in board.list_tasks()]}
 
     async def run_once(self, kind="all", session_id=None, job_id=None):
-        job = await self.claim(kind, session_id, job_id)
+        try:
+            job = await self.claim(kind, session_id, job_id)
+        except DBAPIError as exc:
+            if not exc.connection_invalidated and not str(getattr(exc.orig, "sqlstate", "")).startswith("08"):
+                raise
+            raise QueueConnectionUnavailable(type(exc.orig).__name__) from exc
+        except (OSError, TimeoutError) as exc:
+            raise QueueConnectionUnavailable(type(exc).__name__) from exc
         if job is None:
             return None
         self.failure_evidence = None
         stop = threading.Event()
-        pulse = threading.Thread(target=self.heartbeat, args=(job, stop), daemon=True)
+        self.cancel_signal = threading.Event()
+        pulse = threading.Thread(target=self.heartbeat, args=(job, stop, self.cancel_signal), daemon=True)
         pulse.start()
         result, error = None, None
         try:
@@ -361,9 +378,12 @@ class LiveInferenceWorker:
                 "event_id": event_id, "result": result, "error": error}, file, indent=2)
         async with self.sessions() as db:
             current = await db.get(InferenceJob, job.id, with_for_update=True)
-            if current.status != "running" or current.lease_token != job.lease_token or current.lease_until < utcnow():
+            if (current.status not in {"running", "cancelled"} or current.lease_token != job.lease_token
+                    or (current.status == "running" and current.lease_until < utcnow())):
                 raise RuntimeError("Worker lost its lease; completion was not accepted")
-            current.status = "failed" if error else "completed"
+            from app.models.meeting import Meeting
+            meeting_state = (await db.execute(select(Meeting.status).where(Meeting.id == job.meeting_id))).scalar_one()
+            current.status = "cancelled" if meeting_state == "cancelled" else "failed" if error else "completed"
             current.result, current.error, current.finished_at = result, error, utcnow()
             if job.chunk_id:
                 chunk = await db.get(LiveAudioChunk, job.chunk_id)
@@ -374,7 +394,8 @@ class LiveInferenceWorker:
             elif error and job.kind == "batch":
                 from app.models.meeting import Meeting
                 meeting = await db.get(Meeting, job.meeting_id)
-                meeting.status = "failed"
+                if meeting.status != "cancelled":
+                    meeting.status = "failed"
             await db.commit()
         from app.events.redis_bus import RedisEventBus
         await RedisEventBus().publish(f"events:meetings:{job.meeting_id}:live",
@@ -398,10 +419,12 @@ class LiveInferenceWorker:
             if not user or not user.is_active:
                 raise RuntimeError("Queued text job actor is no longer active")
             actor["role"] = user.role
-            await MeetingService(db).get_meeting(job.meeting_id, actor)
+            meeting = await MeetingService(db).get_meeting(job.meeting_id, actor)
             canonical = await db.get(Transcript, uuid.UUID(job.payload["canonical_transcript_id"]))
             if not canonical or canonical.meeting_id != job.meeting_id or hashlib.sha256(canonical.full_text.encode()).hexdigest() != job.payload["source_sha256"]:
                 raise RuntimeError("Queued transcript changed or is unavailable")
+            if not MeetingService.has_verified_audio_transcript(canonical, meeting.status):
+                raise RuntimeError("Queued transcript no longer has verified REAL audio provenance")
             if self.settings.GEMINI_MODEL != job.payload["model"] or self.settings.TEXT_AI_PROVIDER.lower() != "gemini":
                 raise RuntimeError("Text provider configuration changed after enqueue")
             if job.payload.get("extraction_version") != EXTRACTION_VERSION:
@@ -452,19 +475,42 @@ class LiveInferenceWorker:
             path = self.resolve_persisted_audio_path(audio.file_path)
             if not path.is_relative_to(Path(self.settings.AUDIO_STORAGE_PATH).resolve()):
                 raise RuntimeError("Audio path is outside configured storage")
+            from app.ai.resource_admission import assess_resources
+            from app.ai.multilingual_asr import validate_audio
+            admission = assess_resources(self.settings, validate_audio(str(path))["duration"])
+            self.failure_evidence = {"resource_admission": admission}
+            if admission["state"] == "BLOCKED":
+                raise RuntimeError("REAL resource admission BLOCKED: " + "; ".join(admission["reasons"]))
             ace = get_cli_ace_orchestrator(db)
-            for capability in ("multilingual_asr", "audio_intelligence", "speaker_representation"):
+            async def is_cancelled():
+                from app.models.meeting import Meeting
+                if self.cancel_signal.is_set():
+                    return True
+                async with self.sessions() as status_db:
+                    return (await status_db.execute(select(Meeting.status).where(Meeting.id == job.meeting_id))).scalar_one() == "cancelled"
+            for capability in list(ace.module_runner._handlers):
                 original = ace.module_runner._handlers[capability]
                 async def bound(payload, handler=original):
-                    return await handler({**payload, "input": {**payload["input"], "audio_file_path": str(path)}})
+                    if await is_cancelled():
+                        raise RuntimeError("Meeting processing cancelled before model stage")
+                    result = await handler({**payload, "input": {**payload["input"],
+                        "audio_file_path": str(path), "cancel_check": is_cancelled,
+                        "cancel_check_sync": self.cancel_signal.is_set}})
+                    if await is_cancelled():
+                        raise RuntimeError("Meeting processing cancelled after model stage")
+                    return result
                 ace.module_runner.register_capability_handler(capability, bound)
             self.release_after_stages(ace)
             result = await service.process_meeting(meeting.id, MeetingProcessingRequest(
                 request_id=job.id, correlation_id=job.payload["correlation_id"], force_reprocess=True), actor, ace)
             board = ace.blackboards.get(meeting.id)
             self.failure_evidence = {"execution_mode": "REAL", "elapsed_seconds": time.perf_counter()-started,
+                "resource_admission": admission,
                 "ace_status": result.status, "ace_tasks": [{"id": str(t.task_id), "capability": t.required_capability,
                 "status": getattr(t.status, "value", t.status), "output": t.metadata} for t in board.list_tasks()] if board else []}
+            if board and board.execution_state.get("transcript_persistence"):
+                self.failure_evidence["transcript_persistence"] = board.execution_state["transcript_persistence"]
+                self.failure_evidence["canonical_transcript_id"] = board.execution_state["transcript_persistence"]["canonical_transcript_id"]
             if result.status != "completed":
                 for task in self.failure_evidence["ace_tasks"]:
                     if str(task["status"]).upper() != "FAILED":
@@ -492,6 +538,12 @@ async def main():
     worker = LiveInferenceWorker()
     try:
         if args.warmup and args.kind not in {"finalize", "intelligence"}:
+            from app.ai.resource_admission import assess_resources
+            # Startup estimates one configured chunk; actual jobs recheck their
+            # own validated duration before inference.
+            admission = assess_resources(worker.settings, worker.settings.AUDIO_CHUNK_DURATION_SECONDS)
+            if admission["state"] == "BLOCKED":
+                raise RuntimeError("REAL warmup admission BLOCKED: " + "; ".join(admission["reasons"]))
             import torch
             from app.ai.multilingual_asr import OpenMOSSProvider
             if not torch.cuda.is_available():
@@ -501,8 +553,23 @@ async def main():
                 "token": worker.settings.HF_TOKEN})
             worker.provider._load_model()
             print(json.dumps({"status": "READY", "model_loaded": True, "inference_executed": False}), flush=True)
+        queue_failures = 0
         while True:
-            result = await worker.run_once(args.kind, args.session_id)
+            try:
+                result = await worker.run_once(args.kind, args.session_id)
+            except QueueConnectionUnavailable as exc:
+                queue_failures += 1
+                delay = min(30, 2 ** min(queue_failures, 5))
+                print(json.dumps({"status": "QUEUE_UNAVAILABLE", "error_type": str(exc),
+                                  "consecutive_failures": queue_failures, "retry_seconds": delay,
+                                  "inference_retried": False}), flush=True)
+                if args.once:
+                    raise
+                await asyncio.sleep(delay)
+                continue
+            if queue_failures:
+                print(json.dumps({"status": "QUEUE_AVAILABLE", "previous_failures": queue_failures}), flush=True)
+                queue_failures = 0
             if result:
                 print(json.dumps(result), flush=True)
             if args.once:

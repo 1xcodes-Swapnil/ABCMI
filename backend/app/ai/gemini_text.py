@@ -46,6 +46,8 @@ class GeminiTextProvider:
             raise HTTPException(503, "Gemini request could not complete; check network connectivity") from None
         if response.status_code != 200:
             # Provider error bodies may echo request data. Expose only the status.
+            if response.status_code == 503:
+                raise HTTPException(503, "Gemini service unavailable (HTTP503); retry later")
             raise HTTPException(503, f"Gemini returned HTTP {response.status_code}; check key, model access and quota")
         try:
             raw = response.json()

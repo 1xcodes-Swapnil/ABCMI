@@ -1,4 +1,4 @@
-param([string]$Python, [switch]$WithWorker)
+param([string]$Python, [switch]$WithWorker, [switch]$WarmupWorker)
 $ErrorActionPreference = 'Stop'
 $backendRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $repositoryRoot = (Resolve-Path (Join-Path $backendRoot '..')).Path
@@ -33,7 +33,9 @@ if ($WithWorker) {
     $existingWorker = Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^python' -and $_.CommandLine -like '*app.services.live_inference_worker*' } | Select-Object -First 1
     if ($existingWorker) { $processes += @{service='worker';pid=$existingWorker.ProcessId;status='existing worker; not duplicated'} }
     else {
-        $started = Start-Process -FilePath $Python -ArgumentList @('-m','app.services.live_inference_worker','--kind','all','--warmup') -WorkingDirectory $backendRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $evidenceRoot 'worker.stdout.log') -RedirectStandardError (Join-Path $evidenceRoot 'worker.stderr.log')
+        $workerArguments = @('-m','app.services.live_inference_worker','--kind','all')
+        if ($WarmupWorker) { $workerArguments += '--warmup' }
+        $started = Start-Process -FilePath $Python -ArgumentList $workerArguments -WorkingDirectory $backendRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $evidenceRoot 'worker.stdout.log') -RedirectStandardError (Join-Path $evidenceRoot 'worker.stderr.log')
         $processes += @{service='worker';pid=$started.Id;status='started; readiness not yet checked'}
     }
 }

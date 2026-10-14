@@ -51,6 +51,169 @@ class SpeakerDiarizationEngine:
     _cached_pipeline = None
     _cached_pipeline_key = None
 
+    @staticmethod
+    def _cluster_window_speakers(clustering, observations):
+        """Link retained real voiceprints with the configured pipeline clustering.
+
+        Distinct speakers in one window must never collapse into one identity.
+        Colliding assignments remain explicitly unresolved, as do missing vectors.
+        No participant count is supplied to the clustering algorithm.
+        """
+        import numpy as np
+        from collections import Counter
+        mappings, evidence = {}, []
+        bank, keys = [], []
+        for index, labels, vectors in observations:
+            vectors = np.asarray(vectors, dtype=np.float32)
+            if vectors.ndim != 2 or len(vectors) != len(labels):
+                raise RuntimeError("Invalid retained PyAnnote window embeddings")
+            for label, vector in zip(labels, vectors):
+                key = (index, label)
+                mappings[key] = f"window_{index}:{label}"
+                norm = np.linalg.norm(vector)
+                if np.isfinite(vector).all() and np.isfinite(norm) and norm > 0:
+                    keys.append(key)
+                    bank.append(vector / norm)
+        if not bank:
+            return mappings, {}, evidence
+        vectors = np.stack(bank)
+        groups = (np.zeros(1, dtype=int) if len(bank) == 1 else
+                  clustering.cluster(vectors.copy(), min_clusters=1,
+                                     max_clusters=len(bank), num_clusters=None))
+        counts = Counter((index, int(group)) for (index, _), group in zip(keys, groups))
+        voiceprints = {}
+        for key, vector, group in zip(keys, vectors, groups):
+            index, label = key
+            collision = counts[(index, int(group))] > 1
+            if not collision:
+                mappings[key] = f"pyannote_global_{int(group)}"
+            identity = mappings[key]
+            voiceprints.setdefault(identity, []).append(vector)
+            evidence.append({"window": index, "local_speaker": label,
+                             "global_speaker": identity, "cluster_index": int(group),
+                             "status": "UNRESOLVED_COLLISION" if collision else "CLUSTERED",
+                             "accuracy": "NOT VERIFIED"})
+        centroids = {label: np.mean(rows, axis=0) for label, rows in voiceprints.items()}
+        return mappings, centroids, evidence
+
+    @staticmethod
+    def _bounded_inference(pipeline, path, settings, expected_speakers, cancel_check=None):
+        """Bound waveform memory and reconcile actual window speaker embeddings.
+
+        Overlap is trimmed at each midpoint so windows own disjoint time ranges.
+        Matching similarities are diagnostics, never fabricated confidence values.
+        """
+        import numpy as np
+        import soundfile as sf
+        import torch
+        from scipy.optimize import linear_sum_assignment
+        from pyannote.core import Annotation, Segment
+        from types import SimpleNamespace
+        window = settings.PYANNOTE_WINDOW_SECONDS
+        overlap = settings.PYANNOTE_WINDOW_OVERLAP_SECONDS
+        step = window - overlap
+        merged = Annotation()
+        prototypes, labels, evidence = [], [], []
+        observations, retained_turns = [], []
+        from app.ai.audio_reader import AudioWindowReader
+        with AudioWindowReader(path) as source:
+            rate, frames = source.samplerate, len(source)
+            duration = frames / rate
+            start, index, previous_owned_end = 0.0, 0, 0.0
+            while start < duration:
+                if cancel_check is not None and cancel_check():
+                    raise RuntimeError("Meeting processing cancelled at PyAnnote window boundary")
+                end = min(start + window, duration)
+                first, last = int(round(start * rate)), min(frames, int(round(end * rate)))
+                source.seek(first)
+                waveform = source.read(last-first, dtype="float32", always_2d=True)
+                output = pipeline({"waveform": torch.from_numpy(waveform.T), "sample_rate": rate},
+                                  max_speakers=expected_speakers)
+                annotation = getattr(output, "speaker_diarization", output)
+                embeddings = getattr(output, "speaker_embeddings", None)
+                local_labels = annotation.labels()
+                next_start = min(start + step, max(0.0, duration-window))
+                owned_start = previous_owned_end
+                owned_end = end if end == duration else (end + next_start) / 2
+                mapping, matches, unavailable = {}, [], []
+                if local_labels:
+                    if embeddings is None or len(embeddings) != len(local_labels):
+                        raise RuntimeError("Bounded PyAnnote requires actual per-speaker embeddings")
+                    vectors = np.asarray(embeddings, dtype=np.float32)
+                    if vectors.ndim != 2 or len(vectors) != len(local_labels):
+                        raise RuntimeError(f"Invalid actual PyAnnote speaker embeddings at window {index} ({start}-{end}s), shape={vectors.shape}")
+                    observations.append((index, local_labels, vectors.copy()))
+                    norms = np.linalg.norm(vectors, axis=1)
+                    valid_rows = np.flatnonzero(np.isfinite(vectors).all(axis=1) & np.isfinite(norms) & (norms > 0))
+                    normalized = vectors[valid_rows] / norms[valid_rows, None]
+                    if prototypes and len(valid_rows):
+                        similarities = normalized @ np.asarray(prototypes).T
+                        # Dummy columns let every speaker remain unmatched. Each
+                        # real prototype can be assigned at most once per window.
+                        gains = np.maximum(similarities-settings.PYANNOTE_SPEAKER_MATCH_THRESHOLD, 0)
+                        gains = np.concatenate([gains, np.zeros((len(valid_rows), len(valid_rows)))], axis=1)
+                        rows, columns = linear_sum_assignment(-gains)
+                        for row, column in zip(rows, columns):
+                            if column < len(prototypes) and gains[row, column] > 0:
+                                local_label = local_labels[valid_rows[row]]
+                                mapping[local_label] = labels[column]
+                                matches.append({"local_speaker": local_label, "global_speaker": labels[column],
+                                                "cosine_similarity": float(similarities[row, column])})
+                    for row, label in enumerate(local_labels):
+                        if label not in mapping:
+                            global_label = f"window_{index}:{label}"
+                            mapping[label] = global_label
+                            if row in valid_rows:
+                                labels.append(global_label)
+                                prototypes.append(vectors[row] / norms[row])
+                            else:
+                                # Retain the actual model's window-local turns.
+                                # No cross-window identity or voiceprint can be
+                                # inferred from a zero/nonfinite embedding.
+                                unavailable.append({"local_speaker": label, "global_speaker": global_label,
+                                                    "reason": "nonfinite" if not np.isfinite(vectors[row]).all() else "zero_norm"})
+                    for turn, track, label in annotation.itertracks(yield_label=True):
+                        left, right = max(owned_start, start+float(turn.start)), min(owned_end, start+float(turn.end))
+                        if right > left:
+                            merged[Segment(left, right), f"{index}:{track}"] = mapping[label]
+                            retained_turns.append((index, track, label, left, right))
+                evidence.append({"index": index, "start": start, "end": end, "owned_start": owned_start,
+                                 "owned_end": owned_end, "local_speakers": len(local_labels),
+                                 "speaker_mapping": mapping, "matches": matches,
+                                 "unavailable_embeddings": unavailable})
+                del waveform, output
+                if end == duration:
+                    break
+                # Keep a full context for the final window rather than running
+                # the embedding model on a tiny tail. Ownership uses the actual
+                # overlap, which may be larger than the nominal profile.
+                if next_start <= start:
+                    raise RuntimeError("PyAnnote window planner did not advance")
+                previous_owned_end = owned_end
+                start = next_start
+                index += 1
+        # Revisit the small voiceprint bank globally after bounded inference.
+        # Fixed first-window prototypes fragment returning speakers; reuse the
+        # actual pipeline's configured clustering instead of a new threshold.
+        mapping, centroids, clustering_evidence = SpeakerDiarizationEngine._cluster_window_speakers(
+            pipeline.clustering, observations)
+        merged = Annotation()
+        for index, track, label, left, right in retained_turns:
+            merged[Segment(left, right), f"{index}:{track}"] = mapping[(index, label)]
+        for item in evidence:
+            item["provisional_speaker_mapping"] = item["speaker_mapping"]
+            item["speaker_mapping"] = {label: identity for (index, label), identity in mapping.items()
+                                       if index == item["index"]}
+            item["global_clustering"] = [row for row in clustering_evidence if row["window"] == item["index"]]
+            for unavailable in item["unavailable_embeddings"]:
+                unavailable["global_speaker"] = mapping[(item["index"], unavailable["local_speaker"])]
+        # Return only actual usable embeddings in the declared label order.
+        kept_labels = merged.labels()
+        embedding_labels = [label for label in kept_labels if label in centroids]
+        kept_vectors = np.asarray([centroids[label] for label in embedding_labels], dtype=np.float32)
+        return SimpleNamespace(speaker_diarization=merged, speaker_embeddings=kept_vectors,
+                               embedding_labels=embedding_labels), evidence
+
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         self.config = config or {
             "embedding_dim": 128,
@@ -65,6 +228,7 @@ class SpeakerDiarizationEngine:
         expected_speakers: Optional[int] = None,
         correlation_id: Optional[str] = None,
         audio_file_path: Optional[str] = None,
+        cancel_check=None,
     ) -> DiarizationResult:
         """
         Segments audio into speaker turns and extracts speaker voiceprints.
@@ -130,12 +294,18 @@ class SpeakerDiarizationEngine:
                 # 4. Perform actual inference
                 try:
                     import soundfile as sf
-                    waveform, sample_rate = sf.read(tmp_path, dtype="float32", always_2d=True)
-                    waveform = torch.from_numpy(waveform.T)
-                    diarization_input = {"waveform": waveform, "sample_rate": sample_rate}
                     import time
                     started = time.perf_counter()
-                    diarization = pipeline(diarization_input, num_speakers=expected_speakers)
+                    window_evidence = []
+                    if validate_audio(tmp_path)["duration"] > settings.PYANNOTE_WINDOW_SECONDS:
+                        diarization, window_evidence = self._bounded_inference(pipeline, tmp_path, settings, expected_speakers, cancel_check)
+                    else:
+                        from app.ai.audio_reader import AudioWindowReader
+                        with AudioWindowReader(tmp_path) as source:
+                            sample_rate = source.samplerate
+                            waveform = source.read(len(source), dtype="float32", always_2d=True)
+                        waveform = torch.from_numpy(waveform.T)
+                        diarization = pipeline({"waveform": waveform, "sample_rate": sample_rate}, num_speakers=expected_speakers)
                     inference_seconds = time.perf_counter() - started
                     annotation = getattr(diarization, "speaker_diarization", diarization)
                     embeddings = getattr(diarization, "speaker_embeddings", None)
@@ -159,7 +329,7 @@ class SpeakerDiarizationEngine:
                         raise ValueError("REAL PyAnnote returned no speaker turns")
                     if embeddings is not None:
                         import numpy as np
-                        labels = annotation.labels()
+                        labels = getattr(diarization, "embedding_labels", annotation.labels())
                         if len(embeddings) != len(labels) or not np.isfinite(embeddings).all():
                             raise ValueError("PyAnnote returned invalid speaker embeddings")
                         for spk, embedding in zip(labels, embeddings):
@@ -181,6 +351,14 @@ class SpeakerDiarizationEngine:
                                   "raw_output_type": type(diarization).__name__, "inference_seconds": inference_seconds,
                                   "embedding_shape": list(embeddings.shape) if embeddings is not None else None,
                                   "embedding_dtype": str(embeddings.dtype) if embeddings is not None else None,
+                                  "windows": window_evidence,
+                                  "unavailable_speaker_embeddings": [item for window in window_evidence
+                                                                     for item in window["unavailable_embeddings"]],
+                                  "speaker_match_threshold": settings.PYANNOTE_SPEAKER_MATCH_THRESHOLD,
+                                  "speaker_match_threshold_scope": "provisional_window_matching" if window_evidence else "NOT_APPLICABLE",
+                                  "speaker_reconciliation": "configured_global_clustering_with_collision_guard" if window_evidence else "single_window",
+                                  "speaker_count_status": "UNVERIFIED_MODEL_IDENTITIES",
+                                  "speaker_match_accuracy": "NOT_VERIFIED" if window_evidence else "NOT_APPLICABLE",
                                   "confidence_status": "NOT_VERIFIED"},
                     )
                 except Exception as ex:
@@ -268,7 +446,6 @@ class SpeakerDiarizationEngine:
         matches = 0
         total_checks = 0
         speaker_mapping = {}  # moss_spk -> pyannote_spk
-        mapped_pyannote_speakers = set()
 
         for m_seg in moss_segments:
             m_start = getattr(m_seg, "start_time", m_seg.get("start_time") if isinstance(m_seg, dict) else 0.0)
@@ -311,19 +488,12 @@ class SpeakerDiarizationEngine:
                     else:
                         matches += 1
                 else:
-                    # Check if PyAnnote speaker is already mapped to another MOSS speaker
-                    if best_p_spk in mapped_pyannote_speakers:
-                        disagreements.append({
-                            "type": "SPEAKER_CONFLICT",
-                            "timestamp": f"{m_start:.2f}-{m_end:.2f}",
-                            "moss_speaker": m_spk,
-                            "pyannote_speaker": best_p_spk,
-                            "message": f"MOSS:\nSpeaker {m_spk} -> {m_start:.2f}–{m_end:.2f}\n\npyannote:\nSpeaker {best_p_spk} (Conflict with existing mapping)\n\nVerification:\nSPEAKER_MISMATCH"
-                        })
-                    else:
-                        speaker_mapping[m_spk] = best_p_spk
-                        mapped_pyannote_speakers.add(best_p_spk)
-                        matches += 1
+                    # Chunk-local MOSS identities can fragment one returning
+                    # voice. Multiple MOSS IDs matching one PyAnnote identity
+                    # are not evidence of a conflict. Retain MOSS output and
+                    # still report inconsistent matches for the same MOSS ID.
+                    speaker_mapping[m_spk] = best_p_spk
+                    matches += 1
             else:
                 # MOSS speaker segment has no overlapping PyAnnote speaker segment
                 disagreements.append({
@@ -333,7 +503,7 @@ class SpeakerDiarizationEngine:
                     "message": f"MOSS:\nSpeaker {m_spk} -> {m_start:.2f}–{m_end:.2f}\n\npyannote:\nNo overlapping speech detected\n\nVerification:\nSPEAKER_MISMATCH"
                 })
 
-        accuracy = matches / total_checks if total_checks > 0 else 1.0
+        accuracy = matches / total_checks if total_checks > 0 else None
 
         return {
             "speaker_mapping": speaker_mapping,
@@ -342,3 +512,30 @@ class SpeakerDiarizationEngine:
             "total_checks": total_checks,
             "accuracy": accuracy,
         }
+
+    def reconcile_moss_identities(self, segments, pyannote_turns):
+        """Alias fragmented MOSS IDs only on consistent global model agreement.
+
+        MOSS remains the transcript source. Uncovered, conflicting, or unresolved
+        window-local identities are unchanged. Agreement is not measured accuracy.
+        """
+        report = self.verify_moss_with_pyannote(segments, pyannote_turns)
+        blocked = {item["moss_speaker"] for item in report["disagreements"]}
+        representatives, aliases, changes = {}, {}, []
+        for segment in segments:
+            speaker = segment.speaker_id
+            reference = report["speaker_mapping"].get(speaker)
+            if speaker in blocked or not reference or not reference.startswith("pyannote_global_"):
+                continue
+            representatives.setdefault(reference, speaker)
+            aliases[speaker] = representatives[reference]
+        result = []
+        for segment in segments:
+            speaker = aliases.get(segment.speaker_id, segment.speaker_id)
+            result.append(segment.model_copy(update={"speaker_id": speaker}))
+            if speaker != segment.speaker_id:
+                changes.append({"segment_id": str(segment.segment_id), "original_moss_speaker": segment.speaker_id,
+                                "final_speaker": speaker, "pyannote_identity": report["speaker_mapping"][segment.speaker_id]})
+        return result, {"method": "consistent_global_pyannote_agreement", "aliases": aliases,
+                        "changed_segments": changes, "unresolved_moss_ids": sorted(blocked),
+                        "accuracy": "NOT VERIFIED"}

@@ -8,8 +8,8 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Union
-from pydantic import Field, field_validator
+from typing import List, Literal, Optional, Union
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -158,8 +158,10 @@ class Settings(BaseSettings):
     GEMINI_MAX_OUTPUT_TOKENS: int = Field(default=8192, ge=256, le=65536)
     OPENMOSS_MODEL_ID: str = "OpenMOSS-Team/MOSS-Transcribe-Diarize"
     OPENMOSS_DEVICE: str = "cpu"  # cpu, cuda, auto
+    OPENMOSS_PRECISION: Literal["nf4", "dynamic_int8", "fp32"] = "nf4"
     OPENMOSS_MAX_NEW_TOKENS: int = 5120
     OPENMOSS_CACHE_DIR: Optional[str] = None
+    SARVAM_QUANTIZED_MODEL_PATH: Optional[str] = None
 
     @field_validator("OPENMOSS_CACHE_DIR", mode="before")
     @classmethod
@@ -179,11 +181,20 @@ class Settings(BaseSettings):
     HUGGINGFACE_HUB_CACHE: Optional[str] = None
 
     # Long-Meeting Chunking & Audio Processing Configuration (Phase 4.26)
-    AUDIO_CHUNK_DURATION_SECONDS: float = 600.0  # 10 minutes chunk duration
-    AUDIO_CHUNK_OVERLAP_SECONDS: float = 30.0    # 30 seconds overlap window
-    AUDIO_CHUNK_THRESHOLD_SECONDS: float = 600.0  # Audio duration threshold to trigger chunking
-    AUDIO_CHUNK_CONCURRENCY: int = 1             # Bounded concurrency (default 1 sequential for VRAM safety)
+    AUDIO_CHUNK_DURATION_SECONDS: float = Field(default=8.0, gt=0)
+    AUDIO_CHUNK_OVERLAP_SECONDS: float = Field(default=3.0, gt=0)
+    AUDIO_CHUNK_THRESHOLD_SECONDS: float = Field(default=8.0, gt=0)
+    AUDIO_CHUNK_CONCURRENCY: int = Field(default=1, ge=1)
     AUDIO_CHUNK_STATE_DIR: Optional[str] = None
+    PYANNOTE_WINDOW_SECONDS: float = Field(default=30.0, ge=30.0)
+    PYANNOTE_WINDOW_OVERLAP_SECONDS: float = Field(default=5.0, gt=0)
+    PYANNOTE_SPEAKER_MATCH_THRESHOLD: float = Field(default=0.75, gt=0, lt=1)
+    # Rounded above the measured 35s local run; these are admission estimates,
+    # not a guarantee for arbitrary recordings or model profiles.
+    REAL_WORKER_PEAK_RSS_MB: int = Field(default=6400, gt=0)
+    REAL_WORKER_PEAK_CUDA_MB: int = Field(default=2304, gt=0)
+    REAL_RESOURCE_HEADROOM_RATIO: float = Field(default=1.2, ge=1)
+    REAL_ALLOW_UNVERIFIED_RESOURCE_PROFILE: bool = False
     # Live capture has a separate, small window; batch settings remain independent.
     LIVE_CHUNK_SECONDS: float = 8.0
     LIVE_OVERLAP_SECONDS: float = 3.0
@@ -192,6 +203,16 @@ class Settings(BaseSettings):
     LIVE_WORKER_LEASE_SECONDS: int = 300
     LIVE_WORKER_API_URL: Optional[str] = None
     LIVE_WORKER_TOKEN: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_chunk_profile(self):
+        if self.AUDIO_CHUNK_OVERLAP_SECONDS >= self.AUDIO_CHUNK_DURATION_SECONDS:
+            raise ValueError("Audio chunk overlap must be smaller than chunk duration")
+        if self.AUDIO_CHUNK_THRESHOLD_SECONDS > self.AUDIO_CHUNK_DURATION_SECONDS:
+            raise ValueError("Audio chunk threshold must not exceed chunk duration; otherwise larger audio bypasses chunking")
+        if self.PYANNOTE_WINDOW_OVERLAP_SECONDS >= self.PYANNOTE_WINDOW_SECONDS:
+            raise ValueError("PyAnnote overlap must be smaller than its window duration")
+        return self
 
     @field_validator("AUDIO_STORAGE_PATH", "AUDIO_CHUNK_STATE_DIR", mode="before")
     @classmethod

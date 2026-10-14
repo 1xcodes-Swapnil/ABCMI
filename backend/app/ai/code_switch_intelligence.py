@@ -93,6 +93,10 @@ class CodeSwitchIntelligenceEngine:
 
         model_id = self.config.get("model_id", "sarvamai/sarvam-1")
         settings = get_settings()
+        pre_quantized = bool(settings.SARVAM_QUANTIZED_MODEL_PATH)
+        if pre_quantized:
+            from app.ai.quantized_snapshot import verified_sarvam_snapshot
+            model_id = verified_sarvam_snapshot(settings.SARVAM_QUANTIZED_MODEL_PATH)
         hf_token = getattr(settings, "HF_TOKEN", None)
         is_cuda = torch.cuda.is_available()
         if settings.EXECUTION_MODE.upper() == 'REAL' and settings.OPENMOSS_DEVICE.startswith('cuda') and not is_cuda:
@@ -121,7 +125,7 @@ class CodeSwitchIntelligenceEngine:
                     trust_remote_code=True,
                     token=hf_token,
                     device_map={"": "cuda:0"},
-                    quantization_config=bnb_config,
+                    **({} if pre_quantized else {"quantization_config": bnb_config}),
                     local_files_only=True,
                     cache_dir=cache,
                     dtype=torch.float16,
@@ -148,6 +152,8 @@ class CodeSwitchIntelligenceEngine:
                     )
                     logger.info("REAL MODEL LOADED: Sarvam-1 dynamic INT8 quantized on CPU.")
                 except Exception as q_err:
+                    if settings.EXECUTION_MODE.upper() == "REAL":
+                        raise RuntimeError("REAL Sarvam INT8 quantization failed; precision fallback forbidden") from q_err
                     logger.warning("Dynamic INT8 quantization skipped (%s), using standard model.", q_err)
                     self.model = raw_model
 

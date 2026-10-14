@@ -5,6 +5,7 @@ Confidence Evaluator, Execution Monitor, Policy Manager) with Adaptive Blackboar
 Redis Event Bus, SKW Client Boundary, Failure Recovery, and Verification Flow.
 """
 
+import asyncio
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import uuid
@@ -390,6 +391,8 @@ class ACEOrchestrator:
             )
 
             if decision.action == "RETRY":
+                if decision.delay_seconds:
+                    await asyncio.sleep(decision.delay_seconds)
                 blackboard.record_task_retrying(task.task_id, retry_count=decision.retry_count)
                 retry_event = RetryRequestedEvent(
                     request_id=request_id,
@@ -400,7 +403,7 @@ class ACEOrchestrator:
                     retry_count=decision.retry_count,
                     max_retries=decision.max_retries,
                     correlation_id=correlation_id,
-                    metadata=decision.error_details,
+                    metadata={**decision.error_details, "retry_delay_seconds": decision.delay_seconds},
                 )
                 await self._publish_event(channel, retry_event)
             else:

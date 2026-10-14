@@ -37,8 +37,9 @@ async def queue_text_intelligence(meeting_id: uuid.UUID, auth=Depends(verify_aut
     meeting = await MeetingService(db).get_meeting(meeting_id, auth)
     await db.execute(select(Meeting.id).where(Meeting.id == meeting_id).with_for_update())
     canonical = await TranscriptRepository(db).get_latest_version(meeting_id)
-    if not canonical or not canonical.is_final or not canonical.full_text.strip() or meeting.status != "completed":
-        raise HTTPException(409, "A completed, persisted REAL transcript is required")
+    verified_audio = canonical and MeetingService.has_verified_audio_transcript(canonical, meeting.status)
+    if not verified_audio:
+        raise HTTPException(409, "A final, persisted REAL transcript with completed audio stages is required")
     if (canonical.provenance or {}).get("execution_mode") != "REAL":
         raise HTTPException(409, "Transcript does not carry REAL execution provenance")
     fingerprint = hashlib.sha256((str(canonical.id) + canonical.full_text + provider.model + EXTRACTION_VERSION).encode()).hexdigest()

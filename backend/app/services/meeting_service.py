@@ -4,7 +4,7 @@ Handles business logic for meeting creation, audio artifact upload, authorizatio
 lifecycle state transitions, idempotency checks, and ACE orchestration integration.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,6 +44,19 @@ SUPPORTED_AUDIO_FORMATS: Set[str] = {"wav", "mp3", "m4a", "flac", "ogg", "webm"}
 class MeetingService:
     """Domain service managing meeting lifecycle, scope authorization, storage, and ACE orchestration."""
 
+    @classmethod
+    def has_verified_audio_transcript(cls, canonical, meeting_status):
+        """Permit text recovery from verified audio without changing job failure state."""
+        if (not canonical or not canonical.is_final or not canonical.full_text.strip()
+                or meeting_status == "cancelled"):
+            return False
+        provenance = canonical.provenance or {}
+        if provenance.get("execution_mode") != "REAL":
+            return False
+        completed = {stage.get("capability") for stage in provenance.get("stage_statuses", [])
+                     if stage.get("status") == "COMPLETED"}
+        return meeting_status == "completed" or cls._required_transcript_stages <= completed
+
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
         self.meeting_repo = MeetingRepository(db)
@@ -57,6 +70,8 @@ class MeetingService:
         """
         if current_status == target_status:
             return
+        if current_status == "cancelled":
+            raise BadRequestException(message="Cancelled meetings cannot resume processing", code="INVALID_STATE_TRANSITION")
 
         allowed = VALID_TRANSITIONS.get(current_status, set())
         if target_status not in allowed:
@@ -213,6 +228,18 @@ class MeetingService:
     ) -> Audio:
         """Upload and store audio payload for a meeting session."""
         meeting = await self.get_meeting(meeting_id, auth_context)
+        from sqlalchemy import select
+        from app.models.transcript import TranscriptSegment
+        from app.models.inference_job import InferenceJob
+        await self.db.execute(select(Meeting.id).where(Meeting.id == meeting_id).with_for_update())
+        await self.db.refresh(meeting, ["status"])
+        active = await self.db.scalar(select(InferenceJob.id).where(InferenceJob.meeting_id == meeting_id,
+            InferenceJob.status.in_(["queued", "running"])).limit(1))
+        if active or meeting.status in {"running", "processing_requested"}:
+            raise BadRequestException(message="Finish or cancel processing before uploading another recording", code="AUDIO_IN_PROGRESS")
+        transcript = await self.db.scalar(select(TranscriptSegment.id).where(TranscriptSegment.meeting_id == meeting_id).limit(1))
+        if transcript or meeting.status in {"completed", "cancelled"}:
+            raise BadRequestException(message="Create a new meeting for another recording; this meeting's results are retained", code="NEW_MEETING_REQUIRED")
 
         # File payload validation
         if content is None or (isinstance(content, bytes) and len(content) == 0):
@@ -249,14 +276,19 @@ class MeetingService:
                 try:
                     import av
                     audio_source.seek(0)
-                    with av.open(audio_source) as container:
+                    # Upload spools are opened w+b; PyAV otherwise interprets
+                    # them as an output container instead of an input stream.
+                    with av.open(audio_source, mode="r") as container:
                         stream = next(iter(container.streams.audio), None)
                         if stream is None:
                             raise ValueError("No audio stream")
                         sample_rate, channels = stream.codec_context.sample_rate, stream.codec_context.channels
-                        if stream.duration is not None:
+                        if stream.duration is not None and stream.time_base is not None:
                             duration_seconds = float(stream.duration * stream.time_base)
-                        if not sample_rate or not channels:
+                        elif container.duration is not None:
+                            duration_seconds = float(container.duration / av.time_base)
+                        import math
+                        if not sample_rate or not channels or not duration_seconds or not math.isfinite(duration_seconds) or duration_seconds <= 0:
                             raise ValueError("Invalid audio metadata")
                 except Exception as exc:
                     raise BadRequestException(message="Audio cannot be decoded as a supported real recording", code="INVALID_AUDIO") from exc
@@ -325,14 +357,25 @@ class MeetingService:
             # Mark running during execution
             meeting.status = "running"
             await self.meeting_repo.update(meeting)
+            # Do not hold the meeting row lock during GPU inference. A separate
+            # API request must be able to commit cancellation immediately.
+            await self.db.commit()
 
             blackboard = await ace_orchestrator.process_request(ace_req, auth_context=auth_context)
+
+            await self.db.refresh(meeting, with_for_update=True)
+            if meeting.status == "cancelled":
+                raise RuntimeError("Meeting cancelled; completed transcript publication stopped")
 
             exec_status = blackboard.execution_state.get("status", "COMPLETED").upper()
             final_status = "completed" if exec_status == "COMPLETED" else "failed"
             from app.core.config import get_settings
-            if final_status == "completed" and get_settings().EXECUTION_MODE.upper() == "REAL":
-                await self._persist_real_transcript(meeting, blackboard, ace_req.correlation_id)
+            if get_settings().EXECUTION_MODE.upper() == "REAL":
+                completed_audio = {task.required_capability for task in blackboard.list_tasks()
+                                   if getattr(task.status, "value", task.status) == "COMPLETED"}
+                if final_status == "completed" or self._required_transcript_stages <= completed_audio:
+                    await self._persist_real_transcript(meeting, blackboard, ace_req.correlation_id,
+                                                        processing_status=final_status)
 
             meeting.status = final_status
             await self.meeting_repo.update(meeting)
@@ -348,7 +391,8 @@ class MeetingService:
         except Exception as ex:
             await self.db.rollback()
             await self.db.refresh(meeting)
-            meeting.status = "failed"
+            if meeting.status != "cancelled":
+                meeting.status = "failed"
             await self.meeting_repo.update(meeting)
             await self.db.commit()
             logger.error(f"ACE processing failed for meeting {meeting_id}: {ex}")
@@ -360,7 +404,36 @@ class MeetingService:
                 message=f"Meeting processing failed: {str(ex)}",
             )
 
-    async def _persist_real_transcript(self, meeting, blackboard, correlation_id):
+    _required_transcript_stages = frozenset({"audio_intelligence", "multilingual_asr", "speaker_representation",
+        "overlap_resolution", "code_switch_intelligence", "timestamp_intelligence", "transcript_intelligence",
+        "confidence_fusion", "context_intelligence", "verification_engine"})
+
+    async def recover_verified_audio_transcript(self, job_id):
+        """Publish saved REAL audio output; preserve the failed job/meeting state."""
+        from app.core.config import get_settings
+        from app.models.inference_job import InferenceJob
+        if get_settings().EXECUTION_MODE.upper() != "REAL":
+            raise RuntimeError("Transcript recovery requires REAL execution mode")
+        job = await self.db.get(InferenceJob, job_id, with_for_update=True)
+        if not job or job.status != "failed" or not job.result or job.result.get("execution_mode") != "REAL":
+            raise RuntimeError("Recovery requires an existing failed REAL job with saved outputs")
+        await self.db.refresh(job)
+        meeting = await self.db.get(Meeting, job.meeting_id, with_for_update=True)
+        if meeting.status != "failed":
+            raise RuntimeError("Recovery cannot change a running, cancelled or completed meeting")
+        tasks = job.result.get("ace_tasks", [])
+        outputs = {task["capability"]: task["output"] for task in tasks if task["status"] == "COMPLETED"}
+        if not self._required_transcript_stages <= outputs.keys():
+            raise RuntimeError("Required REAL audio stages did not all complete; recovery refused")
+        report = await self._persist_real_transcript(meeting, None, job.payload["correlation_id"],
+            processing_status="failed", saved_outputs=outputs, saved_stages=tasks)
+        job.result = {**job.result, "transcript_persistence": report,
+                      "canonical_transcript_id": report["canonical_transcript_id"]}
+        await self.db.commit()
+        return report
+
+    async def _persist_real_transcript(self, meeting, blackboard, correlation_id, processing_status="completed",
+                                       saved_outputs=None, saved_stages=None, publish_speaker_revision=False):
         """Persist actual completed provider output and verify it in a fresh session."""
         from sqlalchemy.ext.asyncio import async_sessionmaker
         from app.ai.multilingual_asr import ASRSegment
@@ -368,8 +441,14 @@ class MeetingService:
         from app.ai.speaker_diarization import SpeakerDiarizationEngine
         from app.models.transcript import Transcript, TranscriptSegment
         from app.repositories.transcript_repo import TranscriptRepository, TranscriptSegmentRepository
-        outputs = {task.required_capability: task.metadata for task in blackboard.list_tasks()
-                   if getattr(task.status, "value", task.status) == "COMPLETED"}
+        if processing_status not in {"completed", "failed"}:
+            raise RuntimeError("Invalid transcript publication state")
+        outputs = saved_outputs if saved_outputs is not None else {
+            task.required_capability: task.metadata for task in blackboard.list_tasks()
+            if getattr(task.status, "value", task.status) == "COMPLETED"}
+        stages = saved_stages if saved_stages is not None else [
+            {"id": str(task.task_id), "capability": task.required_capability,
+             "status": getattr(task.status, "value", task.status)} for task in blackboard.list_tasks()]
         asr = outputs.get("multilingual_asr", {})
         overlap = outputs.get("overlap_resolution", {})
         if asr.get("metadata", {}).get("is_fixture") is not False:
@@ -397,13 +476,26 @@ class MeetingService:
         if not segments or any(not (0 <= s.start_time < s.end_time <= duration) for s in segments):
             raise RuntimeError("REAL final transcript contains invalid or empty segments")
         segments.sort(key=lambda s: (s.start_time, s.end_time))
+        segments, identity_reconciliation = SpeakerDiarizationEngine().reconcile_moss_identities(
+            segments, outputs.get("speaker_representation", {}).get("speaker_turns", []))
         expected = [(round(s.start_time*1000), round(s.end_time*1000), s.transcript, s.speaker_id) for s in segments]
         repository = TranscriptSegmentRepository(self.db)
         existing = await repository.list_by_meeting(meeting.id)
+        previous_snapshot = None
         if existing:
             signature = [(s.start_time_ms, s.end_time_ms, s.original_text, s.speaker_label) for s in existing]
             if signature != expected:
-                raise RuntimeError("Existing transcript differs; replacement requires an explicit data action")
+                if not publish_speaker_revision:
+                    raise RuntimeError("Existing transcript differs; replacement requires an explicit data action")
+                if ([row[:3] for row in signature] != [row[:3] for row in expected]
+                        or [str(row.id) for row in existing] != [str(s.segment_id) for s in segments]
+                        or not identity_reconciliation["changed_segments"]):
+                    raise RuntimeError("Speaker revision must preserve every original segment ID, text and timestamp")
+                previous_snapshot = [{"segment_id": str(row.id), "speaker_label": row.speaker_label,
+                    "start_time_ms": row.start_time_ms, "end_time_ms": row.end_time_ms,
+                    "original_text": row.original_text, "sequence_number": row.sequence_number} for row in existing]
+                for row, segment in zip(existing, segments):
+                    row.speaker_label = segment.speaker_id
         else:
             await repository.bulk_create_segments([TranscriptSegment(id=s.segment_id, meeting_id=meeting.id,
                 start_time_ms=round(s.start_time*1000), end_time_ms=round(s.end_time*1000),
@@ -413,15 +505,29 @@ class MeetingService:
         full_text = " ".join(s.transcript for s in segments)
         transcripts = TranscriptRepository(self.db)
         canonical = await transcripts.get_latest_version(meeting.id)
-        if canonical is None:
+        previous_canonical_id = str(canonical.id) if canonical else None
+        next_version = canonical.version + 1 if canonical else 1
+        if previous_snapshot and not canonical:
+            raise RuntimeError("Speaker revision requires the original canonical transcript")
+        if canonical is None or previous_snapshot:
             canonical = await transcripts.create(Transcript(meeting_id=meeting.id, full_text=full_text,
+                version=next_version,
                 language="und", confidence_score=None, word_count=len(full_text.split()), is_final=True,
                 provenance={"execution_mode": "REAL", "correlation_id": correlation_id,
                     "model": asr.get("metadata", {}), "speaker_comparison": comparison,
                     "speaker_mapping": mapping, "deduplicated_segments": removed,
+                    "final_speaker_reconciliation": identity_reconciliation,
+                    "diarization_provenance": outputs.get("speaker_representation", {}).get("metadata", {}),
+                    "previous_transcript_id": previous_canonical_id,
+                    "previous_segment_snapshot": previous_snapshot,
                     "overlap_resolution": overlap,
+                    "meeting_processing_status": processing_status,
+                    "stage_statuses": [{k: stage[k] for k in ("id", "capability", "status")} for stage in stages],
                     "quality_warnings": overlap.get("warnings", [])}))
+        if outputs.get("meeting_analytics"):
+            await self.persist_real_analytics(meeting.id, outputs["meeting_analytics"])
         meeting.settings = {**(meeting.settings or {}), "audio_duration_seconds": duration}
+        meeting.status = processing_status
         await self.db.commit()
         # A separate identity map/transaction proves committed storage, not the
         # in-memory entities that were just added to this session.
@@ -433,11 +539,29 @@ class MeetingService:
                 raise RuntimeError("REAL committed transcript read-back differs from the final result")
             if canonical.provenance != read_transcript.provenance:
                 raise RuntimeError("REAL committed transcript provenance read-back differs")
-        blackboard.execution_state["transcript_persistence"] = {"segments_written": len(expected),
+        report = {"segments_written": len(expected),
             "commit": "passed", "read_back": "passed", "canonical_transcript_id": str(canonical.id),
             "chunk_count": chunk_count, "deduplicated_segments": removed, "speaker_comparison": comparison,
             "overlap_resolution": (canonical.provenance or {}).get("overlap_resolution", {}),
             "quality_warnings": (canonical.provenance or {}).get("quality_warnings", [])}
+        if blackboard is not None:
+            blackboard.execution_state["transcript_persistence"] = report
+        return report
+
+    async def persist_real_analytics(self, meeting_id, result):
+        """Store observed analytics through the existing repository; leave unmeasured scores unavailable."""
+        from app.ai.meeting_analytics import MeetingAnalyticsResult
+        from app.repositories.analytics_repo import AnalyticsRepository
+        from app.core.config import get_settings
+        if get_settings().EXECUTION_MODE.upper() != "REAL":
+            raise RuntimeError("REAL analytics persistence requires REAL mode")
+        measured = MeetingAnalyticsResult.model_validate(result)
+        if measured.meeting_id != meeting_id or measured.total_duration_seconds <= 0 or not measured.speaker_participation:
+            raise RuntimeError("REAL analytics requires matching meeting and observed speaker durations")
+        return await AnalyticsRepository(self.db).upsert_for_meeting(meeting_id,
+            speaking_time_distribution={row.speaker_id: row.speaking_duration_seconds for row in measured.speaker_participation},
+            turn_taking_metrics={row.speaker_id: {"turn_count": row.turn_count} for row in measured.speaker_participation},
+            summary_metrics={**measured.model_dump(mode="json"), "speaker_identity_accuracy": "NOT VERIFIED"})
 
     async def schedule_meeting(
         self,
@@ -523,6 +647,7 @@ class MeetingService:
         auth_context: Dict[str, Any],
     ) -> Meeting:
         meeting = await self.get_meeting(meeting_id, auth_context)
+        await self.db.refresh(meeting, with_for_update=True)
         role = auth_context.get("role")
         user_id_str = auth_context.get("user_id")
         if role != "admin" and meeting.host_id and user_id_str and str(meeting.host_id) != str(user_id_str):
@@ -531,6 +656,13 @@ class MeetingService:
         self.validate_transition(meeting.status, "cancelled")
         meeting.status = "cancelled"
         await self.meeting_repo.update(meeting)
+        from sqlalchemy import update
+        from app.models.inference_job import InferenceJob
+        await self.db.execute(update(InferenceJob).where(
+            InferenceJob.meeting_id == meeting.id, InferenceJob.status.in_(["queued", "running"])
+        ).values(status="cancelled", finished_at=datetime.now(timezone.utc),
+                 error="Meeting cancellation requested"))
+        await self.db.commit()
 
         event_bus = RedisEventBus()
         await event_bus.publish(

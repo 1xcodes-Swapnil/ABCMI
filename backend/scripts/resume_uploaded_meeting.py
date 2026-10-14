@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 import time
+import threading
 import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,10 +35,40 @@ async def run(args):
     event_task = None
     received = 0
     started = time.perf_counter()
+    telemetry_stop = threading.Event()
+    telemetry_thread = None
+    if getattr(args, "worker_pid", None):
+        import psutil
+        process = psutil.Process(args.worker_pid)
+        telemetry_path = folder / f"worker_telemetry_{stamp}.jsonl"
+        result["telemetry_artifact"] = str(telemetry_path.relative_to(ROOT))
+        result["telemetry_scope"] = "specified existing worker; two-second samples, not instantaneous peak"
+
+        def sample_worker():
+            with telemetry_path.open("x", encoding="utf-8") as handle:
+                while not telemetry_stop.is_set():
+                    try:
+                        memory = process.memory_info()
+                        sample = {"timestamp": datetime.now(timezone.utc).isoformat(),
+                                  "worker_pid": process.pid, "rss_bytes": memory.rss,
+                                  "private_bytes": getattr(memory, "private", None),
+                                  "worker_cpu_percent": process.cpu_percent(),
+                                  "system_available_ram_bytes": psutil.virtual_memory().available}
+                    except psutil.Error as exc:
+                        sample = {"timestamp": datetime.now(timezone.utc).isoformat(), "error_type": type(exc).__name__}
+                        handle.write(json.dumps(sample) + "\n")
+                        handle.flush()
+                        break
+                    handle.write(json.dumps(sample) + "\n")
+                    handle.flush()
+                    telemetry_stop.wait(2)
+        telemetry_thread = threading.Thread(target=sample_worker, daemon=True)
+        telemetry_thread.start()
     try:
         async with async_sessionmaker(init_database(), expire_on_commit=False)() as db:
             meeting = await db.get(Meeting, args.meeting)
-            if not meeting or meeting.status != "created":
+            allowed = {"created", "failed"} if getattr(args, "retry_failed", False) else {"created"}
+            if not meeting or meeting.status not in allowed:
                 raise RuntimeError("Only an existing created meeting may be submitted; inspect saved jobs first")
             user = await db.get(User, meeting.host_id)
             if not user or not user.is_active:
@@ -98,6 +129,9 @@ async def run(args):
     except Exception as exc:
         result.update(status="BLOCKED", error_type=type(exc).__name__, error=sanitize_error_text(str(exc)))
     finally:
+        telemetry_stop.set()
+        if telemetry_thread:
+            telemetry_thread.join(timeout=5)
         if event_task:
             event_task.cancel()
             try:
@@ -120,7 +154,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--meeting", type=uuid.UUID, required=True)
+    parser.add_argument("--retry-failed", action="store_true", help="Explicitly submit a failed meeting once; prior evidence is preserved")
+    parser.add_argument("--observation-seconds", type=int, default=600,
+                        help="Observe this submitted job without automatically resubmitting on timeout")
+    parser.add_argument("--worker-pid", type=int, help="Sample the existing worker without starting another worker")
     args = parser.parse_args()
     if not args.run.is_dir():
         parser.error("Use an existing evidence directory")
+    if args.observation_seconds <= 0:
+        parser.error("Observation duration must be positive")
     raise SystemExit(asyncio.run(run(args)))

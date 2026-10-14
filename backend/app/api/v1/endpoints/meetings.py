@@ -90,6 +90,7 @@ def _to_meeting_response(meeting: Any) -> MeetingResponse:
     ]
 
     return MeetingResponse(
+        has_transcript=bool(meeting.__dict__["transcript_segments"]) if "transcript_segments" in meeting.__dict__ else None,
         id=meeting.id,
         title=meeting.title,
         description=meeting.description,

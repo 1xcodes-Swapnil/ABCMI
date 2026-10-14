@@ -37,6 +37,29 @@ from app.ai.multilingual_asr import (
 logger = get_logger("ai.long_audio_processor")
 
 
+def execution_identity(settings) -> Dict[str, Any]:
+    """Bind resumed chunks to the actual local runtime and decoding contract."""
+    import hashlib
+    from importlib.metadata import PackageNotFoundError, version
+    from app.ai.model_inventory import configure_cache, snapshot_for
+    versions = {}
+    for package in ("torch", "transformers", "moss-transcribe-diarize", "bitsandbytes", "pyannote.audio"):
+        try:
+            versions[package] = version(package)
+        except PackageNotFoundError:
+            versions[package] = "NOT AVAILABLE"
+    snapshot = snapshot_for(settings.OPENMOSS_MODEL_ID, configure_cache())
+    sources = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+               for name in ("multilingual_asr.py", "long_audio_processor.py", "speaker_diarization.py", "audio_reader.py")}
+    return {"schema": 1, "model_revision": snapshot.name if snapshot else "NOT AVAILABLE",
+            "device": settings.OPENMOSS_DEVICE, "precision": settings.OPENMOSS_PRECISION,
+            "max_new_tokens": settings.OPENMOSS_MAX_NEW_TOKENS, "do_sample": False,
+            "pyannote_window": settings.PYANNOTE_WINDOW_SECONDS,
+            "pyannote_overlap": settings.PYANNOTE_WINDOW_OVERLAP_SECONDS,
+            "speaker_match_threshold": settings.PYANNOTE_SPEAKER_MATCH_THRESHOLD,
+            "packages": versions, "source_sha256": sources}
+
+
 class ChunkMetadata(CoreBaseModel):
     """Metadata representing an individual audio chunk within a long recording."""
     chunk_id: uuid.UUID = Field(default_factory=uuid.uuid4)
@@ -65,6 +88,7 @@ class ChunkProcessingState(CoreBaseModel):
     completed_chunks_count: int = Field(default=0, ge=0)
     audio_sha256: Optional[str] = None
     model_id: Optional[str] = None
+    execution_identity: Dict[str, Any] = Field(default_factory=dict)
     chunk_segments: Dict[str, List[ASRSegment]] = Field(default_factory=dict)
     checkpoint_version: int = 0
     global_speaker_mapping: Dict[str, str] = Field(
@@ -206,57 +230,39 @@ class LongAudioProcessor:
         out_filename = f"chunk_{chunk.chunk_index}_{uuid.uuid4().hex[:8]}.wav"
         out_path = os.path.join(target_dir, out_filename)
 
+        import soundfile as sf
+        from app.ai.audio_reader import AudioWindowReader
         try:
-            import soundfile as sf
-            with sf.SoundFile(audio_file_path) as src:
-                sr = src.samplerate
-                start_frame = int(chunk.start_time * sr)
-                end_frame = int(chunk.end_time * sr)
-                total_frames = len(src)
-
-                start_frame = max(0, min(start_frame, total_frames))
-                end_frame = max(start_frame, min(end_frame, total_frames))
-                frames_to_read = end_frame - start_frame
-
-                src.seek(start_frame)
-                data = src.read(frames_to_read)
-
+            with AudioWindowReader(audio_file_path) as source:
+                sr = source.samplerate
+                start = max(0, min(int(chunk.start_time * sr), len(source)))
+                end = max(start, min(int(chunk.end_time * sr), len(source)))
+                source.seek(start)
+                data = source.read(end-start, dtype="float32", always_2d=True)
+                if not len(data):
+                    raise RuntimeError("Audio chunk contains no actual samples")
                 sf.write(out_path, data, sr, format="WAV")
                 return out_path
-        except Exception as sf_err:
-            logger.debug(f"soundfile slice failed ({sf_err}), attempting wave fallback...")
-            try:
-                import wave
-                with wave.open(audio_file_path, "rb") as src:
-                    n_channels = src.getnchannels()
-                    sampwidth = src.getsampwidth()
-                    framerate = src.getframerate()
-                    total_frames = src.getnframes()
-
-                    start_frame = int(chunk.start_time * framerate)
-                    end_frame = int(chunk.end_time * framerate)
-                    start_frame = max(0, min(start_frame, total_frames))
-                    end_frame = max(start_frame, min(end_frame, total_frames))
-                    frames_to_read = end_frame - start_frame
-
-                    src.setpos(start_frame)
-                    raw_audio = src.readframes(frames_to_read)
-
-                    with wave.open(out_path, "wb") as dst:
-                        dst.setnchannels(n_channels)
-                        dst.setsampwidth(sampwidth)
-                        dst.setframerate(framerate)
-                        dst.writeframes(raw_audio)
-                    return out_path
-            except Exception as wave_err:
-                raise RuntimeError(
-                    f"Failed to slice audio chunk {chunk.chunk_index} ({chunk.start_time}s -> {chunk.end_time}s): "
-                    f"{wave_err}"
-                ) from wave_err
+        except Exception as exc:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+            raise RuntimeError(f"Failed to decode audio chunk {chunk.chunk_index}") from exc
 
     # -------------------------------------------------------------------------
     # 2. Global Timestamp Reconstruction
     # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _cleanup_temporary_chunk(path, pending):
+        """Remove only an owned chunk; defer transient Windows locks to final cleanup."""
+        if path not in pending:
+            return
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+            pending.remove(path)
+        except OSError as exc:
+            logger.debug("Temporary chunk cleanup deferred: %s", exc)
 
     @staticmethod
     def offset_segments_to_global_time(
@@ -563,6 +569,7 @@ class LongAudioProcessor:
         transcribe_chunk_func: Callable[[str, ChunkMetadata], Any],
         initial_state: Optional[ChunkProcessingState] = None,
         correlation_id: Optional[str] = None,
+        cancel_check=None,
     ) -> LongAudioReconstructionResult:
         """
         Main entry point for processing long audio files.
@@ -582,6 +589,7 @@ class LongAudioProcessor:
         import json
         settings = get_settings()
         state_root = Path(settings.AUDIO_CHUNK_STATE_DIR) if settings.AUDIO_CHUNK_STATE_DIR else None
+        runtime_identity = execution_identity(settings)
         digest = None
         history = state_root / str(meeting_id) if state_root else None
         if history:
@@ -596,7 +604,8 @@ class LongAudioProcessor:
             if initial_state and (initial_state.audio_sha256 != digest or
                 initial_state.chunk_duration_seconds != self.chunk_duration or
                 initial_state.overlap_duration_seconds != self.overlap_duration or
-                initial_state.model_id != settings.OPENMOSS_MODEL_ID):
+                initial_state.model_id != settings.OPENMOSS_MODEL_ID or
+                initial_state.execution_identity != runtime_identity):
                 raise RuntimeError("Saved chunk checkpoint differs from actual audio/model/configuration; refusing stale resume")
             if initial_state:
                 # A crash can occur after a transcript journal is committed but
@@ -633,6 +642,7 @@ class LongAudioProcessor:
                 overall_status="processing",
                 audio_sha256=digest,
                 model_id=settings.OPENMOSS_MODEL_ID,
+                execution_identity=runtime_identity,
             )
 
         def save_state():
@@ -651,6 +661,16 @@ class LongAudioProcessor:
                     output.write(state.model_dump_json(indent=2, exclude={"chunk_segments"}))
                 temporary.replace(target)
         save_state()
+
+        async def check_cancellation():
+            if cancel_check is not None and await cancel_check():
+                state.overall_status = "cancelled"
+                state.updated_at = datetime.utcnow()
+                save_state()
+                await self._emit_chunk_event(meeting_id, "chunk_processing_cancelled", {
+                    "completed_chunks": state.completed_chunks_count, "total_chunks": state.total_chunks,
+                    "correlation_id": corr_id})
+                raise RuntimeError("Meeting processing cancelled at chunk boundary; actual journals preserved")
 
         # Emit initial processing event
         await self._emit_chunk_event(
@@ -671,6 +691,7 @@ class LongAudioProcessor:
         try:
             # 2. Process chunks sequentially or with bounded concurrency
             for idx, chunk_meta in enumerate(state.chunks):
+                await check_cancellation()
                 if chunk_meta.status == "completed":
                     restored = state.chunk_segments.get(str(chunk_meta.chunk_id))
                     if restored is None and get_settings().EXECUTION_MODE.upper() == "REAL":
@@ -755,7 +776,10 @@ class LongAudioProcessor:
                         },
                     )
                     raise chunk_err
+                finally:
+                    self._cleanup_temporary_chunk(chunk_audio_path, temp_chunk_files)
 
+            await check_cancellation()
             # 3. Cross-chunk Speaker Reconciliation
             reconciled_chunks, global_spk_map = self.reconcile_speakers_across_chunks(
                 chunk_results=chunk_results,

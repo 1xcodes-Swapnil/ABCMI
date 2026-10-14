@@ -1,4 +1,4 @@
-# ABCI-MI Backend Architecture & Technical Guide
+﻿# ABCI-MI Backend Architecture & Technical Guide
 
 **Adaptive Blackboard & Collaboration Intelligence for Multilingual Interaction**  
 *Document Version:* 2.0.0  
@@ -74,67 +74,62 @@ backend/
 ## 3. Running Backend Services & Verification
 
 ```bash
-# 1. Install dependencies
+cd backend
+python -m venv .venv
+# Windows
+# .venv\Scripts\activate
+# macOS/Linux
+# source .venv/bin/activate
 pip install -r requirements.txt
-
-# 2. Run database migrations
-alembic upgrade head
-
-# 3. Start development server
+cp .env.example .env
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-# 4. Run test suite
-pytest -v --cov=app
 ```
 
-## Local REAL validation checkpoint
+The backend reads configuration from `backend/.env`, and defaults are defined in `backend/app/core/config.py`.
 
-Run commands from the repository root with the Python environment containing the
-existing compatible torch/CUDA packages. Additional adapter dependencies are in
-`backend/requirements-real.txt`. The recorded local environment uses Python 3.11.9,
-torch/torchaudio 2.6.0+cu124, Transformers 5.16.1, pyannote.audio 4.0.7 and
-PyAV 17.1.0. The version-checked `backend/scripts/patch_pyannote_407.py` fixes
-the unused PLDA load for the 3.1 agglomerative pipeline; its original is backed up.
-No cached model files are modified.
+## Docker Compose startup
 
-Configure `EXECUTION_MODE=REAL`, `HF_HOME`, `HUGGINGFACE_HUB_CACHE`,
-`OPENMOSS_CACHE_DIR`, `OPENMOSS_DEVICE` and a valid `HF_TOKEN` in the existing
-backend environment file. Shared local cache: `F:/hf-cache/hub`.
-
-```powershell
-# Inspect; provisioning reuses valid existing files and downloads missing files only.
-py -3.11 backend/scripts/provision_real_models.py --dry-run
-py -3.11 -m backend.cli --check-real-models
-py -3.11 -m backend.cli --check-real-mode
-
-# Use an actual recording under data/audio/raw. Keep stage arguments identical.
-py -3.11 -m backend.cli real-smoke --stage moss --audio data/audio/raw/ES2002a.Mix-Headset.wav --duration 15
-py -3.11 -m backend.cli real-smoke --stage pyannote --audio data/audio/raw/ES2002a.Mix-Headset.wav --duration 15
-py -3.11 -m backend.cli real-smoke --stage sarvam --audio data/audio/raw/ES2002a.Mix-Headset.wav --duration 15
+```bash
+cd backend
+cp .env.example .env
+docker compose up --build
 ```
 
-`--check-real-models` checks required files and weight shards, not inference.
-`--check-real-mode` checks imports, processor loading and device allocation, not
-generation. `real-smoke` invokes existing adapters; it returns exit 1 on failure
-and saves structural traces and actual model output under `e2e_validation/real_local`.
-Unavailable confidence/language remain null; timestamps are never manufactured.
-Windows MOSS decoding uses its official PyAV alternative when torchcodec is unusable;
-PyAnnote receives actual preloaded waveform tensors.
+This starts the database, Redis, Qdrant, backend API, and the frontend dev server through the Compose file in `backend/docker-compose.yml`.
 
-Local REAL production transcript validation passed on ES2014a at 71–81 seconds:
-MOSS generated three retained segments, PyAnnote executed, all 13 ACE tasks completed,
-and PostgreSQL commit plus an independent session read-back matched the CLI transcript.
-SKW, learned Qdrant embeddings and Redis publication also completed. Evidence:
-`e2e_validation/real_local/ES2014a.Mix-Headset_71_10_9d29e308566b/production_meeting.json`.
-The same excerpt passed a separate two-chunk REAL ASR run (8 s chunks, 3 s overlap).
-This verifies a short persisted transcript, not full-length meeting processing,
-semantic summary quality, or speaker accuracy. MOSS and PyAnnote disagreed on one
-speaker turn. RTTM comparison had zero eligible matched intervals; timestamp
-accuracy remains NOT VERIFIED. Sarvam bounded generation passed; normalization
-accuracy remains NOT VERIFIED and original MOSS text is preserved.
+## Runtime dependencies that are explicitly modeled in code
 
-Cached FLEURS Parquet snapshots are supported locally via `FLEURS_DATASET_ROOT`
-pointing to the snapshot directory; selected original audio bytes are materialized
-under `BENCHMARK_DATA_DIR`, outside the shared cache. No dataset download is needed.
-Benchmark success requires nonempty REAL output and successful required diarization;
-failures return CLI exit 1. Kaggle notebook evidence is not local evidence.
+The repository currently configures these runtime pieces in code:
+
+- PostgreSQL via SQLAlchemy async engine
+- Redis for event bus and cache usage
+- Qdrant for semantic vector storage
+- Local filesystem storage for uploaded audio and generated artifacts
+
+## Optional and external AI integrations
+
+The backend also includes code paths and benchmark tooling for:
+
+- MOSS-Transcribe-Diarize ASR
+- PyAnnote diarization verification
+- Sarvam-style language normalization work
+- Google Gemini-based text processing
+
+These features depend on external model/data availability and are intentionally optional. If they are not configured in the runtime environment, the backend can still start with its core API and infrastructure defaults, but some AI features will be unavailable or degraded.
+
+## Health checks
+
+```bash
+curl http://localhost:8000/api/v1/health
+curl http://localhost:8000/api/v1/health/live
+curl http://localhost:8000/api/v1/health/ready
+```
+
+## Test and validation
+
+```bash
+cd backend
+pytest
+```
+
+The repository includes additional benchmark/validation utilities in `backend/cli.py` and the root-level benchmark scripts. Those are useful for environment probes, not a replacement for a normal application smoke test.

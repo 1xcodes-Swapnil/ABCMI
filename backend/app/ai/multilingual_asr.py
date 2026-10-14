@@ -23,7 +23,7 @@ logger = get_logger("ai.multilingual_asr")
 def validate_audio(audio_path: str) -> Dict[str, Any]:
     """
     Validates audio file existence, readability, format, size, duration, etc.
-    Supported formats: .wav, .mp3, .m4a, .flac
+    Supported formats: .wav, .mp3, .m4a, .flac, .ogg, .webm
     """
     if not audio_path:
         raise ValueError("Audio path cannot be empty.")
@@ -33,7 +33,7 @@ def validate_audio(audio_path: str) -> Dict[str, Any]:
         raise PermissionError(f"Audio file not readable: {audio_path}")
     
     ext = os.path.splitext(audio_path)[1].lower()
-    if ext not in [".wav", ".mp3", ".m4a", ".flac"]:
+    if ext not in [".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"]:
         raise ValueError(f"Unsupported audio format: {ext}")
         
     if os.path.getsize(audio_path) == 0:
@@ -51,17 +51,27 @@ def validate_audio(audio_path: str) -> Dict[str, Any]:
         sample_rate = info.samplerate
         channels = info.channels
     except Exception:
-        # Fallback to librosa if soundfile fails
+        # Inspect compressed container metadata without decoding the full recording.
         try:
-            import librosa
-            y, sr = librosa.load(audio_path, sr=None)
-            duration = float(librosa.get_duration(y=y, sr=sr))
-            sample_rate = sr
-            channels = 1 if len(y.shape) == 1 else y.shape[0]
+            import av
+            with av.open(audio_path) as container:
+                streams = list(container.streams.audio)
+                if not streams:
+                    raise ValueError("No audio stream found")
+                stream = streams[0]
+                sample_rate = stream.codec_context.sample_rate
+                channels = stream.codec_context.channels
+                if stream.duration is not None and stream.time_base is not None:
+                    duration = float(stream.duration * stream.time_base)
+                elif container.duration is not None:
+                    duration = float(container.duration / av.time_base)
+                else:
+                    raise ValueError("Audio container has no duration metadata; full-file decoding is disabled")
         except Exception as ex:
             raise ValueError(f"Could not read audio file metadata: {ex}")
             
-    if duration <= 0:
+    import math
+    if not math.isfinite(duration) or duration <= 0 or not sample_rate or not channels:
         raise ValueError("Audio file has zero or negative duration.")
         
     return {
@@ -132,6 +142,7 @@ class OpenMOSSProvider(ASRProvider):
         self.device = self.config.get("device", "cpu")
         self.cache_dir = self.config.get("cache_dir")
         self.token = self.config.get("token")
+        self.precision = self.config.get("precision", get_settings().OPENMOSS_PRECISION)
         self.model = None
         self.processor = None
         self.last_raw_output = None
@@ -139,10 +150,13 @@ class OpenMOSSProvider(ASRProvider):
 
     def _load_model(self):
         """Loads MOSS weights and processor once per provider instance / process."""
+        import time
+        started_load = time.perf_counter()
+        self.last_load_seconds = 0.0
         if self.model is not None and self.processor is not None:
             return
 
-        cache_key = f"{self.model_id}:{self.device}"
+        cache_key = f"{self.model_id}:{self.device}:{self.precision}:{self.cache_dir}"
         if OpenMOSSProvider._cached_model_key == cache_key and OpenMOSSProvider._cached_model is not None:
             self.model = OpenMOSSProvider._cached_model
             self.processor = OpenMOSSProvider._cached_processor
@@ -172,6 +186,9 @@ class OpenMOSSProvider(ASRProvider):
                 self.processor = self._construct_processor(remove_mistral_key=False)
             device_target = self.device if self.device != "auto" else "auto"
             is_cuda = requested_device.type == "cuda"
+
+            if (is_cuda and self.precision != "nf4") or (not is_cuda and self.precision not in {"dynamic_int8", "fp32"}):
+                raise RuntimeError("Selected MOSS precision is incompatible with the requested device")
 
             if is_cuda:
                 # 4-bit NF4 Quantization for CUDA GPU
@@ -209,20 +226,20 @@ class OpenMOSSProvider(ASRProvider):
                     local_files_only=True,
                 )
                 try:
-                    logger.info("Applying PyTorch dynamic INT8 quantization for Open-MOSS on CPU...")
+                    logger.info("Selected Open-MOSS CPU precision: %s", self.precision)
                     self.model = torch.ao.quantization.quantize_dynamic(
                         raw_model,
                         {torch.nn.Linear},
                         dtype=torch.qint8,
-                    )
-                    logger.info("REAL MODEL LOADED: Open-MOSS dynamic INT8 quantized on CPU.")
+                    ) if self.precision == "dynamic_int8" else raw_model
+                    logger.info("REAL MODEL LOADED: Open-MOSS on CPU with precision %s.", self.precision)
                 except Exception as q_ex:
-                    logger.warning("Dynamic INT8 quantization skipped (%s), using standard CPU model.", q_ex)
-                    self.model = raw_model
+                    raise RuntimeError("Selected CPU MOSS precision could not load; no precision fallback is permitted") from q_ex
 
             OpenMOSSProvider._cached_model = self.model
             OpenMOSSProvider._cached_processor = self.processor
             OpenMOSSProvider._cached_model_key = cache_key
+            self.last_load_seconds = time.perf_counter() - started_load
             logger.info("REAL MODEL LOADED: Open-MOSS '%s' successfully loaded on device '%s'", self.model_id, self.device)
         except Exception as ex:
             raise RuntimeError(
@@ -300,19 +317,19 @@ class OpenMOSSProvider(ASRProvider):
             self.last_inference = {"raw_output_type": type(result).__name__, "raw_output_keys": list(result),
                                    "generated_tokens": result["generated_tokens"], "prompt_tokens": result["prompt_len"],
                                    "generation_seconds": time.perf_counter() - started, "device": str(device),
+                                   "precision": self.precision,
+                                   "model_load_seconds": self.last_load_seconds,
                                    "max_new_tokens": token_budget}
+            generation_journal = (options or {}).get("generation_journal")
+            if generation_journal is not None:
+                generation_journal({"raw_moss_output": self.last_raw_output, **self.last_inference})
             if result["generated_tokens"] >= token_budget:
                 raise ValueError("MOSS reached its generation token limit; truncated output cannot be accepted as complete transcription")
             decoded_text = result["text"]
             
             # Parse decoded_text into ASRSegment formats
             chunk_meta = options.get("chunk_meta") if options else None
-            segments = self._parse_moss_output(decoded_text, chunk_meta=chunk_meta)
-            self.last_inference["parsed_segments_before_audio_bounds"] = len(segments)
-            segments, rejected = self._validate_audio_bounds(segments, audio_metadata["duration"])
-            self.last_inference["rejected_audio_bounds"] = rejected
-            if not segments:
-                raise ValueError("MOSS generated no structured transcript segments.")
+            segments = self._normalize_moss_output(decoded_text, audio_metadata["duration"], chunk_meta)
             
             logger.info(
                 "REAL INFERENCE SUCCEEDED: Extracted %d segments from %s",
@@ -323,6 +340,18 @@ class OpenMOSSProvider(ASRProvider):
         except Exception as ex:
             logger.error("REAL INFERENCE FAILED: Open-MOSS inference error on %s: %s", audio_path, ex)
             raise RuntimeError(f"Open-MOSS inference failed: {ex}") from ex
+
+    def _normalize_moss_output(self, text, duration, chunk_meta=None):
+        self.last_inference.pop("nonlexical_turns", None)
+        segments = self._parse_moss_output(text, chunk_meta=chunk_meta)
+        self.last_inference["parsed_segments_before_audio_bounds"] = len(segments)
+        segments, rejected = self._validate_audio_bounds(segments, duration)
+        self.last_inference["rejected_audio_bounds"] = rejected
+        if not segments:
+            turns = self.last_inference.get("nonlexical_turns")
+            if not turns or any(t["start"] >= duration or t["end"] > duration for t in turns):
+                raise ValueError("MOSS generated no structured transcript segments.")
+        return segments
 
     @staticmethod
     def _validate_audio_bounds(segments, duration):
@@ -360,7 +389,7 @@ class OpenMOSSProvider(ASRProvider):
         from moss_transcribe_diarize import parse_transcript
         if not text or not text.strip():
             raise ValueError("MOSS generated empty output.")
-        parsed = parse_transcript(text)
+        parsed = parse_transcript(text, skip_empty=False)
         segments = []
         for turn in parsed:
             if not (math.isfinite(turn.start) and math.isfinite(turn.end) and 0 <= turn.start < turn.end):
@@ -372,6 +401,12 @@ class OpenMOSSProvider(ASRProvider):
                 metadata={"model": self.model_id, "chunk_index": getattr(chunk_meta, "chunk_index", None),
                           "confidence_status": "NOT_VERIFIED", "language_status": "NOT_VERIFIED"}))
         if not segments:
+            if chunk_meta is not None and parsed and all(not turn.text.strip() for turn in parsed):
+                # Actual timestamped nonlexical turns are valid chunk evidence,
+                # but must never become fabricated words or silence labels.
+                self.last_inference["nonlexical_turns"] = [
+                    {"start": turn.start, "end": turn.end, "speaker": turn.speaker} for turn in parsed]
+                return []
             raise ValueError("MOSS output has no timestamped segments; timestamps cannot be fabricated")
         return segments
 
@@ -438,6 +473,7 @@ class MultilingualASREngine:
         chunk_duration: Optional[float] = None,
         overlap_duration: Optional[float] = None,
         audio_file_path: Optional[str] = None,
+        cancel_check=None,
     ) -> ASRResult:
         """
         Transcribes multilingual audio payload into timed segments with language confidence.
@@ -499,6 +535,7 @@ class MultilingualASREngine:
                     use_fixture=is_fixture_mode,
                     chunk_duration=chunk_duration,
                     overlap_duration=overlap_duration,
+                    cancel_check=cancel_check,
                 )
 
             if exec_mode == "REAL" and not is_fixture_mode:
@@ -738,6 +775,7 @@ class MultilingualASREngine:
         use_fixture: bool = False,
         chunk_duration: Optional[float] = None,
         overlap_duration: Optional[float] = None,
+        cancel_check=None,
     ) -> ASRResult:
         """
         Executes chunked ASR pipeline with overlap for long recordings (1-2+ hours).
@@ -772,10 +810,64 @@ class MultilingualASREngine:
             if exec_mode == "REAL" and not use_fixture:
                 if real_provider is None:
                     raise RuntimeError("REAL mode requested but OpenMOSSProvider was not initialized.")
-                segments = await real_provider.transcribe(chunk_path, options={"chunk_meta": chunk_meta})
-                inference_trace.append({"chunk_index": chunk_meta.chunk_index, "start_time": chunk_meta.start_time,
+                import json
+                from pathlib import Path
+                history = Path(settings.AUDIO_CHUNK_STATE_DIR) / str(meeting_id) if settings.AUDIO_CHUNK_STATE_DIR else None
+                if history is not None:
+                    history.mkdir(parents=True, exist_ok=True)
+                evidence_path = history / f"inference_{chunk_meta.chunk_id}.json" if history is not None else None
+                generation_path = history / f"generation_{chunk_meta.chunk_id}.json" if history is not None else None
+                if evidence_path is not None and evidence_path.exists():
+                    saved = json.loads(evidence_path.read_text(encoding="utf-8"))
+                    if (saved.get("chunk_id") != str(chunk_meta.chunk_id) or saved.get("execution_mode") != "REAL"
+                            or saved.get("start_time") != chunk_meta.start_time or saved.get("end_time") != chunk_meta.end_time):
+                        raise RuntimeError("Invalid actual chunk inference journal")
+                    restored = [ASRSegment.model_validate(row) for row in saved.pop("segment_payloads")]
+                    if not saved.get("raw_moss_output"):
+                        raise RuntimeError("Actual chunk inference journal is empty")
+                    if not restored:
+                        real_provider.last_inference = dict(saved)
+                        normalized = real_provider._normalize_moss_output(saved["raw_moss_output"], chunk_meta.duration, chunk_meta)
+                        if normalized or not real_provider.last_inference.get("nonlexical_turns"):
+                            raise RuntimeError("Empty chunk journal lacks actual nonlexical model evidence")
+                    inference_trace.append({**saved, "recovered_from_inference_journal": True})
+                    return restored
+                import hashlib
+                chunk_digest = hashlib.sha256(Path(chunk_path).read_bytes()).hexdigest()
+                def journal_generation(generated):
+                    if generation_path is not None:
+                        temporary = generation_path.with_name(f"{generation_path.stem}_{uuid.uuid4().hex}.tmp")
+                        with temporary.open("x", encoding="utf-8") as output:
+                            json.dump({**generated, "chunk_id": str(chunk_meta.chunk_id), "execution_mode": "REAL",
+                                       "start_time": chunk_meta.start_time, "end_time": chunk_meta.end_time,
+                                       "chunk_audio_sha256": chunk_digest}, output)
+                        temporary.replace(generation_path)
+                recovered_generation = generation_path is not None and generation_path.exists()
+                if recovered_generation:
+                    generated = json.loads(generation_path.read_text(encoding="utf-8"))
+                    if (generated.get("chunk_id") != str(chunk_meta.chunk_id) or generated.get("execution_mode") != "REAL"
+                            or generated.get("chunk_audio_sha256") != chunk_digest
+                            or generated.get("start_time") != chunk_meta.start_time or generated.get("end_time") != chunk_meta.end_time):
+                        raise RuntimeError("Saved raw generation differs from actual chunk")
+                    if generated["generated_tokens"] >= generated["max_new_tokens"]:
+                        raise RuntimeError("Saved MOSS generation reached its token limit")
+                    real_provider.last_raw_output = generated["raw_moss_output"]
+                    real_provider.last_inference = dict(generated)
+                    segments = real_provider._normalize_moss_output(generated["raw_moss_output"], chunk_meta.duration, chunk_meta)
+                else:
+                    segments = await real_provider.transcribe(chunk_path, options={
+                        "chunk_meta": chunk_meta, "generation_journal": journal_generation})
+                trace = {"chunk_id": str(chunk_meta.chunk_id), "execution_mode": "REAL",
+                    "chunk_index": chunk_meta.chunk_index, "start_time": chunk_meta.start_time,
                     "end_time": chunk_meta.end_time, "segments": len(segments),
-                    "raw_moss_output": real_provider.last_raw_output, **real_provider.last_inference})
+                    "raw_moss_output": real_provider.last_raw_output, **real_provider.last_inference,
+                    "recovered_from_generation_journal": recovered_generation}
+                if evidence_path is not None:
+                    temporary = evidence_path.with_name(f"{evidence_path.stem}_{uuid.uuid4().hex}.tmp")
+                    temporary.write_text(json.dumps({**trace,
+                        "segment_payloads": [segment.model_dump(mode="json") for segment in segments]}), encoding="utf-8")
+                    temporary.replace(evidence_path)
+                inference_trace.append(trace)
                 return segments
             else:
                 # Simulated chunk transcription for fixture/test mode
@@ -824,11 +916,14 @@ class MultilingualASREngine:
             meeting_id=meeting_id,
             transcribe_chunk_func=_transcribe_chunk,
             correlation_id=correlation_id,
+            cancel_check=cancel_check,
         )
 
         recon_result.asr_result.metadata.update(is_fixture=exec_mode != "REAL" or use_fixture,
             model_name=settings.OPENMOSS_MODEL_ID if exec_mode == "REAL" else self.PRETRAINED_MODEL_NAME,
             chunk_count=recon_result.total_chunks, inference=inference_trace)
+        if exec_mode == "REAL" and not recon_result.asr_result.segments:
+            raise RuntimeError("REAL meeting produced no transcript segments; nonlexical chunks alone are not success")
         return recon_result.asr_result
 
     async def process_segment(

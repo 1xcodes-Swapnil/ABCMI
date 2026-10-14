@@ -111,6 +111,7 @@ class MeetingProcessingRequest(CoreBaseModel):
 
 
 class MeetingResponse(CoreBaseModel):
+    has_transcript: Optional[bool] = Field(default=None, description="Whether persisted segments exist; null when not loaded")
     """Comprehensive meeting response schema."""
 
     id: uuid.UUID

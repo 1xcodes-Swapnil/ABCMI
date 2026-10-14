@@ -80,7 +80,8 @@ class RecoveryManager:
                 task_id=task.task_id,
                 retry_count=next_retry_count,
                 max_retries=max_retries,
-                delay_seconds=1.0 * next_retry_count,  # Exponential backoff suggestion
+                delay_seconds=min(60.0, (10.0 if "Gemini" in error_message and "HTTP503" in error_message.replace(" ", "")
+                                        else 1.0) * 2**(next_retry_count-1)),
                 reason=f"Failure within retry budget ({next_retry_count}/{max_retries})",
                 error_details=details,
             )

@@ -1,7 +1,6 @@
+version: "3.9"
+
 services:
-  # ============================================================================
-  # 1. PostgreSQL Database Service
-  # ============================================================================
   postgres:
     image: postgres:16-alpine
     container_name: abcimi_postgres
@@ -18,14 +17,11 @@ services:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-abcimi_db}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
       start_period: 5s
     networks:
       - abcimi_network
 
-  # ============================================================================
-  # 2. Redis Service (Transient state, caching, event bus, blackboard pub/sub)
-  # ============================================================================
   redis:
     image: redis:7-alpine
     container_name: abcimi_redis
@@ -39,35 +35,37 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
       start_period: 5s
     networks:
       - abcimi_network
 
-  # ============================================================================
-  # 3. Qdrant Vector Database (Semantic memory & SKW vector storage)
-  # ============================================================================
   qdrant:
     image: qdrant/qdrant:v1.8.4
     container_name: abcimi_qdrant
     restart: unless-stopped
     ports:
-      - "${QDRANT_PORT:-6333}:6333" # REST API & Web UI Dashboard
-      - "${QDRANT_GRPC_PORT:-6334}:6334" # gRPC API
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:6333/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     networks:
       - abcimi_network
 
-  # ============================================================================
-  # 4. ABCI-MI FastAPI Backend Service
-  # ============================================================================
   backend:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: backend/Dockerfile
     container_name: abcimi_backend
     restart: unless-stopped
+    env_file:
+      - ./.env
     environment:
       ENVIRONMENT: development
       DEBUG: "true"
@@ -79,19 +77,17 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_password}
       POSTGRES_DB: ${POSTGRES_DB:-abcimi_db}
-      # Use the Redis service in this Compose project even if backend/.env
-      # defines a managed REDIS_URL, which otherwise takes precedence.
       REDIS_URL: ""
       REDIS_HOST: redis
       REDIS_PORT: 6379
       QDRANT_HOST: qdrant
       QDRANT_PORT: 6333
       AUDIO_STORAGE_PATH: /app/data/audio
+      CORS_ORIGINS: '["http://localhost:3000","http://127.0.0.1:3000"]'
     ports:
       - "${PORT:-8000}:8000"
     volumes:
-      - .:/app
-      # Keep uploaded audio visible to the host REAL inference worker.
+      - ..:/app
       - ../data/audio:/app/data/audio
     depends_on:
       postgres:
@@ -99,17 +95,32 @@ services:
       redis:
         condition: service_healthy
       qdrant:
+        condition: service_healthy
+    networks:
+      - abcimi_network
+
+  frontend:
+    image: node:20-alpine
+    container_name: abcimi_frontend
+    working_dir: /app
+    command: sh -lc "npm install && npm run dev -- --host 0.0.0.0 --port 3000"
+    environment:
+      VITE_PROXY_TARGET: http://backend:8000
+      CHOKIDAR_USEPOLLING: "true"
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    volumes:
+      - ..:/app
+    depends_on:
+      backend:
         condition: service_started
     networks:
       - abcimi_network
 
 volumes:
   postgres_data:
-    driver: local
   redis_data:
-    driver: local
   qdrant_data:
-    driver: local
 
 networks:
   abcimi_network:
