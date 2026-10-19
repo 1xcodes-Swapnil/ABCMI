@@ -94,7 +94,7 @@ async def queue_meeting(meeting_id: uuid.UUID, auth=Depends(verify_authenticatio
 
 
 @router.get("/meetings/{meeting_id}/pipeline")
-async def pipeline(meeting_id: uuid.UUID, auth=Depends(verify_authentication), db: AsyncSession=Depends(get_async_db)):
+async def pipeline(meeting_id: uuid.UUID, auth=Depends(verify_authentication), db: AsyncSession=Depends(get_async_db), summary: bool=False):
     meeting = await MeetingService(db).get_meeting(meeting_id, auth)
     jobs = (await db.execute(select(InferenceJob).where(InferenceJob.meeting_id == meeting_id)
                             .order_by(InferenceJob.created_at))).scalars().all()
@@ -113,14 +113,39 @@ async def pipeline(meeting_id: uuid.UUID, auth=Depends(verify_authentication), d
                     "checkpoint_version", "updated_at")}
             except (OSError, ValueError) as exc:
                 chunk_progress = {"overall_status": "UNAVAILABLE", "error_type": type(exc).__name__}
+    from datetime import datetime, timezone
+    active_job = next((j for j in reversed(jobs) if j.status in {"queued", "running"}), None)
+    normalization_files = list((Path(state_root) / str(meeting_id) / "normalization").glob("*.json")) if state_root else []
+    lease = active_job.lease_until if active_job else None
+    lease_valid = bool(lease and lease > datetime.now(timezone.utc))
+    phase = meeting.status
+    if active_job:
+        phase = "Queued" if active_job.status == "queued" else (
+            "Text normalization / downstream processing" if chunk_progress and
+            chunk_progress.get("overall_status") == "completed" else "Audio processing")
+    progress = {"phase": phase, "active_job_id": str(active_job.id) if active_job else None,
+        "worker_lease_valid": lease_valid, "worker_lease_until": lease,
+        "saved_normalizations": len(normalization_files),
+        "normalization_updated_at": datetime.fromtimestamp(max(p.stat().st_mtime for p in normalization_files), timezone.utc) if normalization_files else None}
+    def job_result(job):
+        if not summary or not job.result:
+            return job.result
+        data = job.result
+        return {**{k: data[k] for k in ("execution_mode", "ace_status", "canonical_transcript_id", "first_failure", "elapsed_seconds", "event_id") if k in data},
+            "ace_tasks": [{k: task.get(k) for k in ("id", "capability", "status")}
+                          for task in data.get("ace_tasks", [])], "details_available": True}
+    provenance = canonical[0].provenance if canonical else None
+    if summary and provenance:
+        provenance = {"execution_mode": provenance.get("execution_mode"), "details_available": True}
     return {"meeting_id": str(meeting.id), "status": meeting.status,
             "chunk_progress": chunk_progress,
+            "processing_progress": progress,
             "canonical_transcript_id": str(canonical[0].id) if canonical else None,
-            "provenance": canonical[0].provenance if canonical else None,
+            "provenance": provenance,
             "jobs": [{"id": str(j.id), "chunk_id": str(j.chunk_id) if j.chunk_id else None,
                       "kind": j.kind, "status": j.status, "error": j.error,
                       "started_at": j.started_at, "finished_at": j.finished_at,
-                      "result": j.result} for j in jobs]}
+                      "result": job_result(j)} for j in jobs]}
 
 
 @router.post("/meetings/{meeting_id}/processing/cancel")

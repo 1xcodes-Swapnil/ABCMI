@@ -21,7 +21,7 @@ class SpeakerVoiceprint(CoreBaseModel):
     """Voiceprint embedding vector representation for a speaker."""
     speaker_id: str = Field(..., description="Unique speaker identifier")
     embedding_vector: List[float] = Field(default_factory=list, description="Dimensional voiceprint vector")
-    confidence: Optional[float] = Field(default=0.95, ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class SpeakerTurn(CoreBaseModel):
@@ -30,7 +30,7 @@ class SpeakerTurn(CoreBaseModel):
     speaker_id: str = Field(..., description="Assigned speaker ID")
     start_time: float = Field(..., ge=0.0)
     end_time: float = Field(..., ge=0.0)
-    confidence: Optional[float] = Field(default=0.92, ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class DiarizationResult(CoreBaseModel):
@@ -39,7 +39,7 @@ class DiarizationResult(CoreBaseModel):
     num_speakers: int = Field(default=1, ge=1)
     speaker_turns: List[SpeakerTurn] = Field(default_factory=list)
     voiceprints: List[SpeakerVoiceprint] = Field(default_factory=list)
-    overall_confidence: Optional[float] = Field(default=0.91, ge=0.0, le=1.0)
+    overall_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -52,11 +52,29 @@ class SpeakerDiarizationEngine:
     _cached_pipeline_key = None
 
     @staticmethod
-    def _cluster_window_speakers(clustering, observations):
+    def _temporal_cluster_conflicts(assignments, intervals):
+        """Only simultaneous distinct voices form a cannot-link constraint."""
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for key, group in assignments:
+            groups[(key[0], int(group))].append(key)
+        conflicts = set()
+        for keys in groups.values():
+            for i, left in enumerate(keys):
+                for right in keys[i+1:]:
+                    overlap = sum(max(0.0, min(b, d)-max(a, c))
+                        for a, b in intervals.get(left, []) for c, d in intervals.get(right, []))
+                    if overlap > 0.05:
+                        conflicts.update((left, right))
+        return conflicts
+
+    @staticmethod
+    def _cluster_window_speakers(clustering, observations, retained_turns=None,
+                                 expected_speakers=None):
         """Link retained real voiceprints with the configured pipeline clustering.
 
-        Distinct speakers in one window must never collapse into one identity.
-        Colliding assignments remain explicitly unresolved, as do missing vectors.
+        Simultaneous voices must not collapse into one identity. Different
+        local labels in disjoint time spans may be the same returning voice.
         No participant count is supplied to the clustering algorithm.
         """
         import numpy as np
@@ -77,20 +95,73 @@ class SpeakerDiarizationEngine:
         if not bank:
             return mappings, {}, evidence
         vectors = np.stack(bank)
-        groups = (np.zeros(1, dtype=int) if len(bank) == 1 else
-                  clustering.cluster(vectors.copy(), min_clusters=1,
-                                     max_clusters=len(bank), num_clusters=None))
+        if len(bank) == 1:
+            groups = np.zeros(1, dtype=int)
+        elif expected_speakers is not None:
+            if expected_speakers < 1:
+                raise ValueError("expected_speakers must be positive")
+            cluster_count = min(expected_speakers, len(bank))
+            groups = clustering.cluster(vectors.copy(), min_clusters=cluster_count,
+                                        max_clusters=cluster_count,
+                                        num_clusters=cluster_count)
+        else:
+            groups = clustering.cluster(vectors.copy(), min_clusters=1,
+                                        max_clusters=len(bank), num_clusters=None)
+        intervals = {}
+        for index, _, label, left, right in (retained_turns or []):
+            intervals.setdefault((index, label), []).append((left, right))
+        # The configured unconstrained clustering can put simultaneous local
+        # voices in one group. Rejecting all such members loses their identities.
+        # Split only conflicting groups using the actual embedding distances,
+        # with complete linkage preventing indirect cannot-link merges. This
+        # does not supply an oracle participant count or merge separate groups.
+        source_groups = np.asarray(groups).copy()
+        if retained_turns is not None:
+            from scipy.cluster.hierarchy import linkage, fcluster
+            from scipy.spatial.distance import pdist, squareform
+            next_group = int(max(groups)) + 1
+            groups = np.asarray(groups).copy()
+            for group in np.unique(source_groups):
+                members = np.flatnonzero(source_groups == group)
+                if len(members) < 2:
+                    continue
+                distances = squareform(np.clip(pdist(vectors[members], metric="cosine"), 0.0, 2.0))
+                constrained = False
+                for a, left_index in enumerate(members):
+                    left = keys[left_index]
+                    for b in range(a+1, len(members)):
+                        right = keys[members[b]]
+                        if left[0] != right[0]:
+                            continue
+                        overlap = sum(max(0.0, min(end, stop)-max(start, begin))
+                                      for start, end in intervals.get(left, [])
+                                      for begin, stop in intervals.get(right, []))
+                        if overlap > 0.05:
+                            # All cosine distances are <=2; 3 is a hard cannot-link.
+                            distances[a, b] = distances[b, a] = 3.0
+                            constrained = True
+                if not constrained:
+                    continue
+                partitions = fcluster(linkage(squareform(distances, checks=False), method="complete"),
+                                      t=2.0+1e-6, criterion="distance")
+                for offset, partition in enumerate(np.unique(partitions)):
+                    identity = int(group) if offset == 0 else next_group
+                    if offset:
+                        next_group += 1
+                    groups[members[partitions == partition]] = identity
+        conflicts = SpeakerDiarizationEngine._temporal_cluster_conflicts(zip(keys, groups), intervals)
         counts = Counter((index, int(group)) for (index, _), group in zip(keys, groups))
         voiceprints = {}
-        for key, vector, group in zip(keys, vectors, groups):
+        for key, vector, group, source_group in zip(keys, vectors, groups, source_groups):
             index, label = key
-            collision = counts[(index, int(group))] > 1
+            collision = (key in conflicts if retained_turns is not None else counts[(index, int(group))] > 1)
             if not collision:
                 mappings[key] = f"pyannote_global_{int(group)}"
             identity = mappings[key]
             voiceprints.setdefault(identity, []).append(vector)
             evidence.append({"window": index, "local_speaker": label,
                              "global_speaker": identity, "cluster_index": int(group),
+                             "unconstrained_cluster_index": int(source_group),
                              "status": "UNRESOLVED_COLLISION" if collision else "CLUSTERED",
                              "accuracy": "NOT VERIFIED"})
         centroids = {label: np.mean(rows, axis=0) for label, rows in voiceprints.items()}
@@ -196,7 +267,7 @@ class SpeakerDiarizationEngine:
         # Fixed first-window prototypes fragment returning speakers; reuse the
         # actual pipeline's configured clustering instead of a new threshold.
         mapping, centroids, clustering_evidence = SpeakerDiarizationEngine._cluster_window_speakers(
-            pipeline.clustering, observations)
+            pipeline.clustering, observations, retained_turns, expected_speakers)
         merged = Annotation()
         for index, track, label, left, right in retained_turns:
             merged[Segment(left, right), f"{index}:{track}"] = mapping[(index, label)]
@@ -356,7 +427,8 @@ class SpeakerDiarizationEngine:
                                                                      for item in window["unavailable_embeddings"]],
                                   "speaker_match_threshold": settings.PYANNOTE_SPEAKER_MATCH_THRESHOLD,
                                   "speaker_match_threshold_scope": "provisional_window_matching" if window_evidence else "NOT_APPLICABLE",
-                                  "speaker_reconciliation": "configured_global_clustering_with_collision_guard" if window_evidence else "single_window",
+                                  "speaker_reconciliation": "embedding_clustering_with_temporal_constrained_splits_v2" if window_evidence else "single_window",
+                                  "temporal_collision_guard_version": 2 if window_evidence else 0,
                                   "speaker_count_status": "UNVERIFIED_MODEL_IDENTITIES",
                                   "speaker_match_accuracy": "NOT_VERIFIED" if window_evidence else "NOT_APPLICABLE",
                                   "confidence_status": "NOT_VERIFIED"},
@@ -513,29 +585,126 @@ class SpeakerDiarizationEngine:
             "accuracy": accuracy,
         }
 
-    def reconcile_moss_identities(self, segments, pyannote_turns):
-        """Alias fragmented MOSS IDs only on consistent global model agreement.
+    @staticmethod
+    def repair_saved_diarization(result):
+        """Repair the former window-wide guard from actual saved cluster evidence."""
+        import copy
+        import numpy as np
+        from collections import Counter
+        metadata = copy.deepcopy(result.metadata)
+        windows = metadata.get("windows", [])
+        if metadata.get("temporal_collision_guard_version", 0) >= 1:
+            return result
+        if not windows:
+            labels = sorted({t.speaker_id for t in result.speaker_turns})
+            aliases = {label: label if label.startswith("pyannote_global_") else f"pyannote_global_{i}"
+                       for i, label in enumerate(labels)}
+            metadata.update(temporal_collision_guard_version=1, single_window_global_aliases=aliases)
+            return result.model_copy(update={
+                "speaker_turns": [t.model_copy(update={"speaker_id": aliases[t.speaker_id]}) for t in result.speaker_turns],
+                "voiceprints": [v.model_copy(update={"speaker_id": aliases.get(v.speaker_id, v.speaker_id)}) for v in result.voiceprints],
+                "metadata": metadata})
+        rows = [row for w in windows for row in w.get("global_clustering", [])]
+        if not rows:
+            return result
+        intervals, assignments = {}, []
+        for w in windows:
+            for row in w.get("global_clustering", []):
+                key = (w["index"], row["local_speaker"])
+                assignments.append((key, row["cluster_index"]))
+                intervals[key] = [(max(t.start_time, w["owned_start"]), min(t.end_time, w["owned_end"]))
+                    for t in result.speaker_turns if t.speaker_id == row["global_speaker"]
+                    and t.end_time > w["owned_start"] and t.start_time < w["owned_end"]]
+        conflicts = SpeakerDiarizationEngine._temporal_cluster_conflicts(assignments, intervals)
+        mapping, label_mapping = {}, {}
+        weights = Counter(row["global_speaker"] for row in rows)
+        for w in windows:
+            for row in w.get("global_clustering", []):
+                old = row["global_speaker"]
+                key = (w["index"], row["local_speaker"])
+                new = old if key in conflicts else f"pyannote_global_{row['cluster_index']}"
+                mapping[(w["index"], old)] = new
+                if old in label_mapping and label_mapping[old] != new:
+                    raise RuntimeError("Saved diarization identity maps inconsistently")
+                label_mapping[old] = new
+                row.update(previous_global_speaker=old, global_speaker=new,
+                           status="UNRESOLVED_TEMPORAL_COLLISION" if key in conflicts else "CLUSTERED")
+                w["speaker_mapping"][row["local_speaker"]] = new
+        turns = []
+        for turn in result.speaker_turns:
+            owned = [w for w in windows if turn.start_time >= w["owned_start"]-1e-6
+                     and turn.end_time <= w["owned_end"]+1e-6]
+            if len(owned) != 1:
+                raise RuntimeError("Saved diarization turn has ambiguous window ownership")
+            turns.append(turn.model_copy(update={"speaker_id": mapping.get(
+                (owned[0]["index"], turn.speaker_id), turn.speaker_id)}))
+        bank = {}
+        for voice in result.voiceprints:
+            new = label_mapping.get(voice.speaker_id, voice.speaker_id)
+            bank.setdefault(new, []).append((voice.embedding_vector, weights.get(voice.speaker_id, 1)))
+        voices = [SpeakerVoiceprint(speaker_id=label, embedding_vector=np.average(
+            np.asarray([v for v, _ in values]), axis=0, weights=[w for _, w in values]).tolist(),
+            confidence=None) for label, values in bank.items()]
+        metadata.update(temporal_collision_guard_version=1,
+            speaker_reconciliation="global_clustering_with_actual_temporal_cannot_links",
+            saved_speaker_repair={"previous_labels": result.num_speakers,
+                "remaining_temporal_conflicts": len(conflicts), "new_model_inference": False},
+            windows=windows)
+        return result.model_copy(update={"speaker_turns": turns, "voiceprints": voices,
+            "num_speakers": len({t.speaker_id for t in turns}), "metadata": metadata})
 
-        MOSS remains the transcript source. Uncovered, conflicting, or unresolved
-        window-local identities are unchanged. Agreement is not measured accuracy.
-        """
-        report = self.verify_moss_with_pyannote(segments, pyannote_turns)
-        blocked = {item["moss_speaker"] for item in report["disagreements"]}
-        representatives, aliases, changes = {}, {}, []
+    def reconcile_moss_identities(self, segments, pyannote_turns):
+        """Use time-supported global identities; ambiguity is not a new person."""
+        from collections import defaultdict
+        result, changes, unresolved, assignments = [], [], [], defaultdict(set)
+        pyannote_turns = [SpeakerTurn.model_validate(t) if isinstance(t, dict) else t for t in pyannote_turns]
         for segment in segments:
-            speaker = segment.speaker_id
-            reference = report["speaker_mapping"].get(speaker)
-            if speaker in blocked or not reference or not reference.startswith("pyannote_global_"):
-                continue
-            representatives.setdefault(reference, speaker)
-            aliases[speaker] = representatives[reference]
-        result = []
-        for segment in segments:
-            speaker = aliases.get(segment.speaker_id, segment.speaker_id)
-            result.append(segment.model_copy(update={"speaker_id": speaker}))
+            scores = defaultdict(float)
+            intervals = defaultdict(list)
+            for turn in pyannote_turns:
+                left = max(segment.start_time, turn.start_time)
+                right = min(segment.end_time, turn.end_time)
+                if right > left:
+                    intervals[turn.speaker_id].append((left, right))
+            # Union each identity's intervals: duplicate tracks must not count
+            # the same instant twice and inflate dominance/coverage. Include
+            # tiny turns in the union rather than dropping each before summing.
+            for identity, spans in intervals.items():
+                merged = []
+                for left, right in sorted(spans):
+                    if merged and left <= merged[-1][1]:
+                        merged[-1] = (merged[-1][0], max(right, merged[-1][1]))
+                    else:
+                        merged.append((left, right))
+                scores[identity] = sum(right-left for left, right in merged)
+            uncertain_overlap = sum(value for identity, value in scores.items()
+                                    if not identity.startswith("pyannote_global_"))
+            scores = {identity: value for identity, value in scores.items()
+                      if identity.startswith("pyannote_global_")}
+            ranked = sorted(scores.items(), key=lambda item: -item[1])
+            duration = segment.end_time-segment.start_time
+            supported = (ranked and uncertain_overlap <= 0.05 and ranked[0][1] >= 0.5*duration
+                         and ranked[0][1] >= 0.8*sum(scores.values()))
+            reference = ranked[0][0] if supported else None
+            speaker = reference or "UNRESOLVED"
+            assignments[segment.speaker_id].add(speaker)
+            metadata = {**segment.metadata, "original_moss_speaker": segment.speaker_id,
+                "speaker_identity_status": "MODEL_ALIGNED" if supported else "UNRESOLVED",
+                "speaker_overlap_seconds": dict(scores),
+                "unresolved_identity_overlap_seconds": uncertain_overlap,
+                "speaker_identity_accuracy": "NOT VERIFIED"}
+            result.append(segment.model_copy(update={"speaker_id": speaker, "metadata": metadata}))
+            item = {"segment_id": str(segment.segment_id), "original_moss_speaker": segment.speaker_id,
+                    "final_speaker": speaker, "pyannote_identity": reference}
             if speaker != segment.speaker_id:
-                changes.append({"segment_id": str(segment.segment_id), "original_moss_speaker": segment.speaker_id,
-                                "final_speaker": speaker, "pyannote_identity": report["speaker_mapping"][segment.speaker_id]})
-        return result, {"method": "consistent_global_pyannote_agreement", "aliases": aliases,
-                        "changed_segments": changes, "unresolved_moss_ids": sorted(blocked),
-                        "accuracy": "NOT VERIFIED"}
+                changes.append(item)
+            if not supported:
+                unresolved.append({**item, "reason": "insufficient_or_ambiguous_global_speaker_overlap"})
+        aliases = {source: next(iter(labels)) for source, labels in assignments.items()
+                   if len(labels) == 1 and "UNRESOLVED" not in labels}
+        return result, {"method": "dominant_global_union_time_overlap_v3", "aliases": aliases,
+            "changed_segments": changes, "unresolved_segments": unresolved,
+            "unresolved_moss_ids": sorted({r["original_moss_speaker"] for r in unresolved}),
+            "model_speaker_groups": len({s.speaker_id for s in result if s.speaker_id != "UNRESOLVED"}),
+            "minimum_segment_coverage": 0.5, "minimum_overlap_dominance": 0.8,
+            "accuracy": "NOT VERIFIED"}

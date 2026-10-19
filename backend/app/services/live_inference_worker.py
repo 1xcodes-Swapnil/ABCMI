@@ -78,6 +78,11 @@ class LiveInferenceWorker:
                 provider_class = getattr(module, class_name)
                 for attribute in attributes:
                     setattr(provider_class, attribute, None)
+        if capability in {None, "multilingual_asr"}:
+            whisper_module = sys.modules.get("app.ai.whisper_provider")
+            if whisper_module is not None:
+                whisper_module.WhisperHFProvider._cache = None
+                whisper_module.WhisperHFProvider._cache_key = None
         gc.collect()
         torch = sys.modules.get("torch")
         if torch is not None and torch.cuda.is_initialized():
@@ -495,6 +500,10 @@ class LiveInferenceWorker:
                         raise RuntimeError("Meeting processing cancelled before model stage")
                     result = await handler({**payload, "input": {**payload["input"],
                         "audio_file_path": str(path), "cancel_check": is_cancelled,
+                        "target_languages": list(dict.fromkeys(
+                            str(code).strip().lower() for code in
+                            [meeting.language, *(meeting.secondary_languages or [])]
+                            if code and str(code).strip().lower() not in {"auto", "und", "unknown"})),
                         "cancel_check_sync": self.cancel_signal.is_set}})
                     if await is_cancelled():
                         raise RuntimeError("Meeting processing cancelled after model stage")
@@ -533,7 +542,7 @@ async def main():
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--kind", choices=["all", "chunk", "finalize", "batch", "intelligence"], default="all")
     parser.add_argument("--session-id", type=uuid.UUID)
-    parser.add_argument("--warmup", action="store_true", help="Load cached CUDA MOSS before accepting jobs")
+    parser.add_argument("--warmup", action="store_true", help="Load the selected cached CUDA ASR before accepting jobs")
     args = parser.parse_args()
     worker = LiveInferenceWorker()
     try:
@@ -541,18 +550,27 @@ async def main():
             from app.ai.resource_admission import assess_resources
             # Startup estimates one configured chunk; actual jobs recheck their
             # own validated duration before inference.
-            admission = assess_resources(worker.settings, worker.settings.AUDIO_CHUNK_DURATION_SECONDS)
+            admission = assess_resources(worker.settings, worker.settings.AUDIO_CHUNK_DURATION_SECONDS,
+                                         batch=args.kind == "batch")
             if admission["state"] == "BLOCKED":
                 raise RuntimeError("REAL warmup admission BLOCKED: " + "; ".join(admission["reasons"]))
             import torch
             from app.ai.multilingual_asr import OpenMOSSProvider
             if not torch.cuda.is_available():
                 raise RuntimeError("CUDA unavailable; no CPU fallback")
-            worker.provider = OpenMOSSProvider({"model_id": worker.settings.OPENMOSS_MODEL_ID,
-                "device": worker.settings.OPENMOSS_DEVICE, "cache_dir": worker.settings.OPENMOSS_CACHE_DIR,
-                "token": worker.settings.HF_TOKEN})
-            worker.provider._load_model()
+            if args.kind == "batch" and worker.settings.BATCH_ASR_PROVIDER == "whisper":
+                from app.ai.whisper_provider import WhisperHFProvider
+                selected_provider = WhisperHFProvider()
+            else:
+                selected_provider = OpenMOSSProvider({"model_id": worker.settings.OPENMOSS_MODEL_ID,
+                    "device": worker.settings.OPENMOSS_DEVICE, "cache_dir": worker.settings.OPENMOSS_CACHE_DIR,
+                    "token": worker.settings.HF_TOKEN})
+                worker.provider = selected_provider
+            selected_provider._load_model()
             print(json.dumps({"status": "READY", "model_loaded": True, "inference_executed": False}), flush=True)
+            # The shared cache owns warm weights. Do not retain an extra
+            # Whisper pipeline reference after stage cleanup releases it.
+            selected_provider = None
         queue_failures = 0
         while True:
             try:

@@ -102,7 +102,7 @@ class MeetingUnderstandingEngine:
                 raise ValueError("REAL meeting understanding requires an actual transcript")
             context = context_data or {}
             provenance = ProvenanceMetadataSchema(producing_module="meeting_understanding",
-                model_name=get_settings().OPENMOSS_MODEL_ID,
+                model_name=context.get("model_name") or "verbatim_transcript",
                 source_segments=context.get("source_segments", []),
                 source_intervals=context.get("source_intervals", []),
                 processing_metadata={"execution_mode": "REAL", "representation": "verbatim_transcript",
@@ -125,24 +125,13 @@ class MeetingUnderstandingEngine:
             generation = None
             if get_settings().TEXT_AI_PROVIDER.lower() == "gemini":
                 from app.ai.grounded_meeting_text import extract_meeting_items
-                settings = get_settings()
-                import json
-                input_characters = len(json.dumps({"turns": context.get("turns", [])}, ensure_ascii=False))
-                if input_characters > settings.GEMINI_MAX_INPUT_CHARACTERS:
-                    # Preserve the real transcript when a long meeting exceeds
-                    # the separate text provider's input budget.
-                    candidates = []
-                    generation = {"status": "DEFERRED", "reason": "text_input_limit",
-                        "model": settings.GEMINI_MODEL, "input_characters": input_characters,
-                        "limit_characters": settings.GEMINI_MAX_INPUT_CHARACTERS,
-                        "inference_executed": False}
-                else:
-                    candidates, generation = await extract_meeting_items(context.get("turns", []))
+                candidates, generation = await extract_meeting_items(context.get("turns", []))
                 for candidate in candidates:
+                    item_generation = candidate.get("generation_metadata", generation)
                     prov = ProvenanceMetadataSchema(producing_module="meeting_understanding",
-                        model_name=generation["model"], model_version=generation.get("model_version"),
+                        model_name=item_generation["model"], model_version=item_generation.get("model_version"),
                         source_segments=candidate["source_segments"], source_intervals=candidate["source_intervals"],
-                        processing_metadata={**generation, "correlation_id": correlation_id,
+                        processing_metadata={**item_generation, "correlation_id": correlation_id,
                             "citation_quotes_validated": True, "semantic_accuracy": "NOT_VERIFIED"})
                     extra = {"requires_verification": True, "citations": candidate["citations"],
                              "source_segments": candidate["source_segments"], "source_intervals": candidate["source_intervals"]}

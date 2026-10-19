@@ -197,8 +197,8 @@ class AIModuleRunner:
                         raise ValueError("REAL transcript intelligence requires actual ASR segments")
                     asr_result = ASRResult(meeting_id=uuid.UUID(str(meeting_id)),
                         full_transcript=asr["transcript"], segments=segments, overall_confidence=None,
-                        metadata={**asr.get("metadata", {}), "model_name": settings.OPENMOSS_MODEL_ID,
-                                  "provenance": "REAL MOSS"})
+                        metadata={**asr.get("metadata", {}),
+                                  "provenance": "REAL selected ASR; model identity retained from provider"})
                     result = await TranscriptIntelligenceEngine().process_transcript(asr_result, correlation_id=correlation_id)
                     if not result.cleaned_segments:
                         raise ValueError("REAL transcript intelligence produced no segments")
@@ -232,14 +232,53 @@ class AIModuleRunner:
                     if not observed_segments:
                         raise ValueError("REAL normalization requires actual ASR turns")
                     engine = CodeSwitchIntelligenceEngine()
+                    # Keep genuine completed text generations across worker loss.
+                    # Bind them to input, model revision, runtime and producer code.
+                    import hashlib
+                    import json
+                    from pathlib import Path
+                    from importlib.metadata import version
+                    from app.ai.model_inventory import configure_cache, snapshot_for
+                    snapshot = snapshot_for(engine.config["model_id"], configure_cache())
+                    identity = {"model_revision": snapshot.name if snapshot else None,
+                        "config": engine.config, "device": settings.OPENMOSS_DEVICE,
+                        "quantized_path": settings.SARVAM_QUANTIZED_MODEL_PATH,
+                        "packages": {p: version(p) for p in ("torch", "transformers", "bitsandbytes")},
+                        "sources": {str(p.name): hashlib.sha256(p.read_bytes()).hexdigest() for p in
+                            (Path(__file__), Path(__file__).parents[1] / "ai" / "code_switch_intelligence.py")}}
+                    journal = (Path(settings.AUDIO_CHUNK_STATE_DIR) / str(uuid.UUID(str(meeting_id))) / "normalization"
+                               if settings.AUDIO_CHUNK_STATE_DIR else None)
+                    if journal:
+                        journal.mkdir(parents=True, exist_ok=True)
                     normalized_turns = []
                     for segment in observed_segments:
                         original = segment.get("transcript", "")
                         if not original.strip():
                             continue
+                        key = hashlib.sha256(json.dumps({"identity": identity, "original": original}, sort_keys=True).encode()).hexdigest()
+                        path = journal / f"{key}.json" if journal else None
+                        if path and path.exists():
+                            saved = json.loads(path.read_text(encoding="utf-8"))
+                            if (saved.get("execution_mode") != "REAL" or saved.get("identity") != identity
+                                    or saved.get("original_text") != original or not saved.get("canonical_text")
+                                    or saved.get("raw_completion") != saved["canonical_text"]
+                                    or not saved.get("inference", {}).get("device", "").startswith("cuda")
+                                    or not saved.get("inference", {}).get("generated_tokens", 0)):
+                                raise RuntimeError("Saved REAL normalization journal is invalid")
+                            canonical_text = saved["canonical_text"]
+                            inference = {**saved["inference"], "reused_real_journal": str(path.name)}
+                        else:
+                            canonical_text = await engine.map_to_canonical(original)
+                            inference = dict(engine.last_inference)
+                            if path:
+                                saved = {"execution_mode": "REAL", "identity": identity, "original_text": original,
+                                    "canonical_text": canonical_text, "raw_completion": engine.last_raw_completion,
+                                    "inference": inference}
+                                temporary = path.with_name(f"{key}_{uuid.uuid4().hex}.tmp")
+                                temporary.write_text(json.dumps(saved, ensure_ascii=False), encoding="utf-8")
+                                temporary.replace(path)
                         normalized_turns.append({"segment_id": segment.get("segment_id"),
-                            "original_text": original, "canonical_text": await engine.map_to_canonical(original),
-                            "inference": dict(getattr(engine, "last_inference", {}))})
+                            "original_text": original, "canonical_text": canonical_text, "inference": inference})
                     if not normalized_turns:
                         raise ValueError("REAL normalization returned no actual turns")
                     canonical = " ".join(turn["canonical_text"] for turn in normalized_turns)
@@ -358,6 +397,9 @@ class AIModuleRunner:
                             "capability": cap,
                             "confidence_score": sd_res.overall_confidence,
                             "result_data": {
+                                "meeting_id": str(sd_res.meeting_id),
+                                "num_speakers": sd_res.num_speakers,
+                                "overall_confidence": sd_res.overall_confidence,
                                 "speakers": list(set(t.speaker_id for t in sd_res.speaker_turns)),
                                 "diarization_confidence": sd_res.overall_confidence,
                                 "speaker_turns": [t.model_dump() for t in sd_res.speaker_turns],

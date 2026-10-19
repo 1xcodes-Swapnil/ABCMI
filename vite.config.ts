@@ -15,6 +15,7 @@ export default defineConfig(() => {
     },
     server: {
       host: '0.0.0.0',
+      allowedHosts: ['0a432f5378810.notebooksc.jarvislabs.net'],
       port: 3000,
       proxy: {'/api': apiProxyTarget},
       // HMR is disabled in AI Studio via DISABLE_HMR env var.

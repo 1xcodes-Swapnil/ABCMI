@@ -613,7 +613,8 @@ class MeetingIntelligenceService:
             .order_by(KnowledgeObject.created_at.desc())
         )
         res = await self.db.execute(stmt)
-        ko = res.scalars().first()
+        summaries = list(res.scalars().all())
+        ko = summaries[0] if summaries else None
 
         if not ko:
             # Fallback placeholder if summary is not yet synthesized
@@ -634,6 +635,27 @@ class MeetingIntelligenceService:
                 created_at=meeting.created_at or datetime.now(timezone.utc),
                 updated_at=meeting.updated_at,
             )
+
+        metadata = (ko.provenance or {}).get("processing_metadata", {})
+        window = metadata.get("text_window")
+        if window:
+            correlation = metadata.get("correlation_id")
+            members = [s for s in summaries
+                       if correlation and (s.provenance or {}).get("processing_metadata", {}).get("correlation_id") == correlation
+                       and (s.provenance or {}).get("processing_metadata", {}).get("text_window", {}).get("batch_count") == window["batch_count"]]
+            members.sort(key=lambda s: (s.provenance or {})["processing_metadata"]["text_window"]["batch_index"])
+            indices = {(s.provenance or {})["processing_metadata"]["text_window"]["batch_index"] for s in members}
+            if indices != set(range(window["batch_count"])):
+                raise NotFoundException(message="Complete transcript window summaries are not available", code="SUMMARY_NOT_AVAILABLE")
+            return SummaryResponse(
+                id=ko.id, meeting_id=ko.meeting_id, title="Transcript window summaries",
+                content="\n\n".join(f"{s.title}\n{s.content}" for s in members),
+                sections=[SummarySection(heading=s.title, content=s.content, key_points=[]) for s in members],
+                key_takeaways=[], confidence=None, version=ko.version,
+                provenance={**(ko.provenance or {}), "summary_scope": "transcript_windows",
+                            "whole_meeting_summary": False,
+                            "window_summary_ids": [str(s.id) for s in members]},
+                created_at=ko.created_at, updated_at=ko.updated_at)
 
         payload = ko.payload or {}
         raw_sections = payload.get("sections", [])

@@ -836,7 +836,7 @@ export const IntelligenceViewer: React.FC<IntelligenceViewerProps> = ({
                   onChange={(e) => setSelectedSpeaker(e.target.value)}
                   className="bg-neutral-950 text-neutral-200 text-xs rounded-lg border border-neutral-800 px-2.5 py-1.5 pr-7 focus:outline-none focus:border-indigo-500"
                 >
-                  <option value="all">All Speakers ({speakers.length})</option>
+                  <option value="all">All speaker labels ({speakers.length})</option>
                   {speakers.map((spk) => (
                     <option key={spk} value={spk}>
                       {spk}

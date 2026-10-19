@@ -108,10 +108,13 @@ async def check_database_health() -> Dict[str, Any]:
 
         assert async_engine is not None, "Engine initialization failed."
 
-        async with asyncio.timeout(settings.DATABASE_HEALTH_TIMEOUT_SECONDS):
+        async def probe_database():
             async with async_engine.connect() as conn:
                 result = await conn.execute(text("SELECT 1"))
-                val = result.scalar()
+                return result.scalar()
+
+        # asyncio.timeout requires Python 3.11; template instances also use 3.10.
+        val = await asyncio.wait_for(probe_database(), timeout=settings.DATABASE_HEALTH_TIMEOUT_SECONDS)
 
         latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
         return {
@@ -129,5 +132,5 @@ async def check_database_health() -> Dict[str, Any]:
             "latency_ms": latency_ms,
             "database": settings.POSTGRES_DB,
             "host": settings.POSTGRES_SERVER,
-            "error": "PostgreSQL health check timed out" if isinstance(e, TimeoutError) else str(e),
+            "error": "PostgreSQL health check timed out" if isinstance(e, (TimeoutError, asyncio.TimeoutError)) else str(e),
         }

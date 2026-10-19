@@ -1,5 +1,5 @@
 """Local-only inventory of the official models used by the existing REAL adapters."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -30,7 +30,7 @@ MODELS = (
               ("pytorch_model.bin",)),
     ModelSpec("Speaker embedding model", "pyannote/wespeaker-voxceleb-resnet34-LM", "256 dimensional speaker embeddings",
               "speaker-diarization-3.1", ("pytorch_model.bin",)),
-    ModelSpec("Whisper/WhisperX", "openai/whisper-large-v3", "Optional separate ASR model", "Not used by current MOSS REAL route",
+    ModelSpec("Whisper/WhisperX", "openai/whisper-large-v3", "Explicit selectable batch ASR model", "WhisperHFProvider when selected",
               ("config.json", "preprocessor_config.json", "tokenizer.json"), required=False),
     ModelSpec("Semantic embedding", "sentence-transformers/all-MiniLM-L6-v2", "Learned 384-dimensional text embeddings",
               "SemanticIndexer", ("config.json", "tokenizer_config.json", "tokenizer.json", "model.safetensors"),
@@ -101,4 +101,9 @@ def inspect_snapshot(spec: ModelSpec, snapshot: Path | None) -> dict:
 
 def inventory() -> list[dict]:
     cache = configure_cache()
-    return [inspect_snapshot(spec, snapshot_for(spec.repository, cache)) for spec in MODELS]
+    from app.core.config import get_settings
+    settings = get_settings()
+    selected = settings.BATCH_ASR_PROVIDER
+    specs = [replace(spec, required=selected == "whisper", repository=settings.WHISPER_MODEL_ID) if spec.repository == "openai/whisper-large-v3"
+             else spec for spec in MODELS]
+    return [inspect_snapshot(spec, snapshot_for(spec.repository, cache)) for spec in specs]

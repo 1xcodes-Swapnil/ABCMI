@@ -118,6 +118,45 @@ def execute(run):
     save(run / "execution.json", trace)
     boards, planned = [], []
     events, provider_calls = [], []
+    saved_diarization, saved_normalizations = None, None
+    normalization_cursor = 0
+    if preflight.get("resume_evidence_dir"):
+        source = Path(preflight["resume_evidence_dir"]).resolve()
+        if not source.is_relative_to(REPO / "e2e_validation" / "runs"):
+            raise RuntimeError("Resume evidence must be an existing application run")
+        prior = json.loads((source / "execution.json").read_text())
+        for key in ("meeting_id", "audio_sha256", "execution_mode", "cli_user_id", "cli_tenant_id"):
+            if prior.get(key) != preflight.get(key):
+                raise RuntimeError("Saved REAL evidence identity differs: " + key)
+        if prior.get("execution_mode") != "REAL":
+            raise RuntimeError("Only actual REAL generation evidence may be resumed")
+        from app.ai.long_audio_processor import execution_identity
+        history = Path(get_settings().AUDIO_CHUNK_STATE_DIR) / preflight["meeting_id"]
+        state = json.loads(sorted(history.glob("state_*.json"))[-1].read_text())
+        if (state["execution_identity"] != execution_identity(get_settings())
+                or state["audio_sha256"] != preflight["audio_sha256"]):
+            raise RuntimeError("Saved model/runtime/audio identity differs")
+        saved_diarization = json.loads((source / "pyannote.json").read_text())
+        if (saved_diarization.get("status") != "COMPLETED"
+                or saved_diarization["output"]["meeting_id"] != preflight["meeting_id"]
+                or not saved_diarization["output"].get("speaker_turns")):
+            raise RuntimeError("No actual completed diarization to resume")
+        saved_normalizations = json.loads((source / "sarvam_calls.json").read_text())
+        originals = json.loads((source / "deduplication.json").read_text())["final_segments"]
+        if [c.get("input_text") for c in saved_normalizations] != [s["transcript"] for s in originals]:
+            raise RuntimeError("Saved normalization inputs differ from actual ASR turns")
+        for row in saved_normalizations:
+            inf = row.get("inference", {})
+            if (row.get("status") != "COMPLETED" or not row.get("output")
+                    or row["output"] != row.get("raw_completion")
+                    or not str(inf.get("device", "")).startswith("cuda")
+                    or inf.get("generated_tokens", 0) <= 0 or not inf.get("raw_output_exists")):
+                raise RuntimeError("Saved normalization lacks actual CUDA generation evidence")
+        save(run / "resume_cache_manifest.json", {"source_run": str(source),
+            "meeting_id": preflight["meeting_id"], "audio_sha256": preflight["audio_sha256"],
+            "runtime_identity_verified": True, "saved_sarvam_generations": len(saved_normalizations),
+            "artifacts": {name: hashlib.sha256((source/name).read_bytes()).hexdigest()
+                          for name in ("execution.json", "pyannote.json", "sarvam_calls.json", "deduplication.json")}})
     factory = cli.get_cli_ace_orchestrator
     def observed_factory(*a, **kw):
         obj = factory(*a, **kw)
@@ -173,6 +212,13 @@ def execute(run):
     diarize = SpeakerDiarizationEngine.diarize_audio
     async def observed_diarize(self, *a, **kw):
         started = time.perf_counter()
+        if saved_diarization is not None:
+            from app.ai.speaker_diarization import DiarizationResult
+            result = DiarizationResult.model_validate(saved_diarization["output"])
+            save(run / "pyannote.json", {**saved_diarization,
+                "recovered_from_real_evidence": str(source / "pyannote.json"),
+                "inference_executed_in_this_run": False, "recovery_seconds": time.perf_counter()-started})
+            return result
         try:
             result = await diarize(self, *a, **kw)
             save(run / "pyannote.json", {"status":"COMPLETED", "elapsed_seconds":time.perf_counter()-started,
@@ -186,7 +232,22 @@ def execute(run):
     normalize = CodeSwitchIntelligenceEngine.map_to_canonical
     normalizations = []
     async def observed_normalize(self, text):
+        nonlocal normalization_cursor
         started = time.perf_counter()
+        if saved_normalizations is not None:
+            if normalization_cursor >= len(saved_normalizations):
+                raise RuntimeError("Actual normalization has more turns than saved evidence")
+            row = saved_normalizations[normalization_cursor]
+            if row["input_text"] != text:
+                raise RuntimeError("Actual normalization turn differs from saved generation")
+            normalization_cursor += 1
+            self.last_raw_completion = row["raw_completion"]
+            self.last_inference = {**row["inference"], "recovered_from_real_evidence": True}
+            normalizations.append({**row, "source_generation_timestamp": row["timestamp"],
+                "recovered_from_real_evidence": str(source / "sarvam_calls.json"),
+                "inference_executed_in_this_run": False, "recovery_seconds": time.perf_counter()-started})
+            save(run / "sarvam_calls.json", normalizations)
+            return row["output"]
         record = {"input_text": text, "timestamp": now()}
         normalizations.append(record)
         try:

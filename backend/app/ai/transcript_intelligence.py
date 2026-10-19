@@ -89,6 +89,11 @@ class TranscriptIntelligenceEngine:
         """
         if not text:
             return "", []
+        from app.core.config import get_settings
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            # Canonical REAL speech stays verbatim. Readability edits require
+            # a separate representation, never deletion of observed words.
+            return text, []
 
         removed = []
         tokens = text.split()
@@ -211,7 +216,8 @@ class TranscriptIntelligenceEngine:
             spk = seg.speaker_id or "speaker_unknown"
             gap = seg.start_time - curr_end
 
-            if spk == curr_spk and gap <= max_gap:
+            if (spk == curr_spk and spk not in {"UNRESOLVED", "speaker_unknown", "SPEAKER_UNKNOWN"}
+                    and 0 <= gap <= max_gap):
                 curr_end = max(curr_end, seg.end_time)
                 curr_texts.append(seg.cleaned_transcript)
                 curr_seg_ids.extend(seg.source_segment_ids)

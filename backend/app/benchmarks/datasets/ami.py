@@ -299,7 +299,8 @@ class AMIDatasetAdapter(BaseDatasetAdapter):
                 audio_path=str(audio), audio_format="wav", duration_seconds=info.duration, language=language,
                 reference_transcript=" ".join(w["text"] for w in words), reference_segments=words,
                 reference_speaker_turns=turns, ground_truth_status="ground_truth_available",
-                metadata={"annotation_sources": sources, "split": "local; official split not verified"})
+                metadata={"annotation_sources": sources, "split": "local; official split not verified",
+                          "reference_speaker_count": len({turn["speaker"] for turn in turns})})
             sample.compute_sha256()
             samples.append(sample)
         return samples

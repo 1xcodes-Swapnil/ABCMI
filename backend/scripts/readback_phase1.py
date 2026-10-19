@@ -131,6 +131,39 @@ def finalize(run,read):
     reconstruction=json.loads((run/"speaker_reconciliation.json").read_text()) if (run/"speaker_reconciliation.json").exists() else {}
     offsets=[]
     local={s['segment_id']:(c.get('chunk',{}).get('start_time',0),s) for c in moss for s in c.get('segments',[])}
+    # A resumed execution reuses actual journals, so provider calls in this
+    # process alone cannot prove coverage. Keep calls unchanged and validate
+    # the original persisted outputs separately.
+    resumed_evidence = None
+    if execution.get("resume_meeting_id"):
+        import hashlib
+        from types import SimpleNamespace
+        from app.ai.multilingual_asr import OpenMOSSProvider, ASRSegment
+        history = Path(get_settings().AUDIO_CHUNK_STATE_DIR) / execution["meeting_id"]
+        provider = OpenMOSSProvider()
+        verified = []
+        signature = lambda rows: [(x.start_time, x.end_time, x.transcript, x.speaker_id,
+                                   x.detected_language, x.confidence) for x in rows]
+        for chunk in read.get("persisted_chunks", []):
+            path = history / f"inference_{chunk['chunk_id']}.json"
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            assert raw["execution_mode"] == "REAL" and raw["chunk_id"] == chunk["chunk_id"]
+            assert raw["start_time"] == chunk["start_time"] and raw["end_time"] == chunk["end_time"]
+            assert raw["generated_tokens"] < raw["max_new_tokens"]
+            provider.last_inference = dict(raw)
+            parsed = provider._normalize_moss_output(raw["raw_moss_output"],
+                chunk["end_time"] - chunk["start_time"], SimpleNamespace(chunk_index=chunk["chunk_index"]))
+            payloads = raw["segment_payloads"]
+            assert signature(parsed) == signature([ASRSegment.model_validate(x) for x in payloads])
+            for row in payloads:
+                local[row["segment_id"]] = (chunk["start_time"], row)
+            verified.append({"chunk_id": chunk["chunk_id"], "artifact": str(path),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "parsed_segment_count": len(parsed), "generation_seconds": raw.get("generation_seconds"),
+                "recovery_attempt": raw.get("recovery_attempt"), "generated_tokens": raw["generated_tokens"]})
+        resumed_evidence = {"status": "VERIFIED" if len(verified) == len(execution["coverage"]) else "NOT VERIFIED",
+                            "model_generation_executed_during_readback": False, "journals": verified}
+        save(run / "resumed_inference_journals.json", resumed_evidence)
     for chunk in reconstruction.get('inputs',[]):
         for segment in chunk['global_segments']:
             source=local.get(segment['segment_id'])
@@ -146,7 +179,8 @@ def finalize(run,read):
         'bounds_valid':bool(persisted) and all(0<=s['start_time_ms']<s['end_time_ms']<=round(execution['audio_duration']*1000) for s in persisted)}
     save(run/'timestamp_validation.json',math)
     gates={"real_mode":execution["execution_mode"]=="REAL",
-        "all_chunks_moss":len(moss)==len(execution["coverage"]) and all(c["status"]=="COMPLETED" for c in moss),
+        "all_chunks_moss":(resumed_evidence["status"] == "VERIFIED" if resumed_evidence is not None else
+            len(moss)==len(execution["coverage"]) and all(c["status"]=="COMPLETED" for c in moss)),
         "pyannote":pyannote.get("status")=="COMPLETED", "persisted_chunk_metadata":read.get("chunk_metadata_persisted",False),
         "cross_chunk_reconciliation":len(reconstruction.get('inputs',[]))>1 and bool(reconstruction.get('mapping')),
         "timestamps":math['all_offsets_match'] and math['chronological'] and math['bounds_valid'],

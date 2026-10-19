@@ -183,7 +183,7 @@ def production(run,audio,resume):
     # These are actual planning IDs, separate from runtime chunk IDs; save them.
     write(run/'planned_chunks.json',[c.model_dump(mode='json') for c in plan])
     preflight={**info,'run_id':run.name,'timestamp':datetime.now(timezone.utc).isoformat(),
-        'execution_mode':'REAL','status':'PREPARED','title':'Kaggle full REAL ABCI-MI production',
+        'execution_mode':'REAL','status':'PREPARED','title':os.environ.get('ABCI_RUN_TITLE','REAL ABCI-MI production validation'),
         'chunk_duration':settings.AUDIO_CHUNK_DURATION_SECONDS,'overlap':settings.AUDIO_CHUNK_OVERLAP_SECONDS,
         'step':settings.AUDIO_CHUNK_DURATION_SECONDS-settings.AUDIO_CHUNK_OVERLAP_SECONDS,
         'coverage':[[c.start_time,c.end_time] for c in plan],'coverage_has_gaps':any(b.start_time>a.end_time for a,b in zip(plan,plan[1:])),
@@ -191,7 +191,12 @@ def production(run,audio,resume):
         'source_archive_sha256':os.environ.get('ABCI_SOURCE_ARCHIVE_SHA256','NOT AVAILABLE'),
         'cli_user_id':os.environ.get('ABCI_USER_ID','00000000-0000-0000-0000-000000000001'),
         'cli_tenant_id':os.environ.get('ABCI_TENANT_ID','default-tenant')}
-    if resume: preflight['resume_meeting_id']=resume
+    if resume:
+        preflight['resume_meeting_id']=resume
+        preflight['meeting_id']=resume
+    if os.environ.get('ABCI_RESUME_EVIDENCE_DIR'):
+        if not resume: raise RuntimeError('Saved REAL evidence requires an explicit existing meeting')
+        preflight['resume_evidence_dir']=os.environ['ABCI_RESUME_EVIDENCE_DIR']
     write(run/'preflight.json',preflight)
     write(run/'audio_metadata.json',info)
     exit_code=validate_phase1.execute(run)

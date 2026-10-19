@@ -42,18 +42,24 @@ def execution_identity(settings) -> Dict[str, Any]:
     import hashlib
     from importlib.metadata import PackageNotFoundError, version
     from app.ai.model_inventory import configure_cache, snapshot_for
+    from app.ai.asr_selection import batch_asr_identity
+    selected = batch_asr_identity(settings)
     versions = {}
     for package in ("torch", "transformers", "moss-transcribe-diarize", "bitsandbytes", "pyannote.audio"):
         try:
             versions[package] = version(package)
         except PackageNotFoundError:
             versions[package] = "NOT AVAILABLE"
-    snapshot = snapshot_for(settings.OPENMOSS_MODEL_ID, configure_cache())
+    snapshot = snapshot_for(selected["model_id"], configure_cache())
     sources = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
                for name in ("multilingual_asr.py", "long_audio_processor.py", "speaker_diarization.py", "audio_reader.py")}
+    if selected["provider"] == "whisper":
+        for name in ("whisper_provider.py", "asr_selection.py"):
+            sources[name] = hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
     return {"schema": 1, "model_revision": snapshot.name if snapshot else "NOT AVAILABLE",
-            "device": settings.OPENMOSS_DEVICE, "precision": settings.OPENMOSS_PRECISION,
-            "max_new_tokens": settings.OPENMOSS_MAX_NEW_TOKENS, "do_sample": False,
+            "device": settings.OPENMOSS_DEVICE, "precision": selected["precision"],
+            "batch_provider": selected,
+            "max_new_tokens": 440 if selected["provider"] == "whisper" else settings.OPENMOSS_MAX_NEW_TOKENS, "do_sample": False,
             "pyannote_window": settings.PYANNOTE_WINDOW_SECONDS,
             "pyannote_overlap": settings.PYANNOTE_WINDOW_OVERLAP_SECONDS,
             "speaker_match_threshold": settings.PYANNOTE_SPEAKER_MATCH_THRESHOLD,
@@ -346,6 +352,8 @@ class LongAudioProcessor:
                 # First chunk: assign new global speakers for every distinct speaker in this chunk
                 for seg in segments:
                     spk = seg.speaker_id or "SPEAKER_UNKNOWN"
+                    if spk in {"UNRESOLVED", "SPEAKER_UNKNOWN"}:
+                        continue  # No model identity exists to reconcile.
                     map_key = f"chunk_{c_idx}:{spk}"
                     if map_key in global_speaker_map:
                         local_to_global[spk] = global_speaker_map[map_key]
@@ -365,6 +373,8 @@ class LongAudioProcessor:
                 if overlap_end > overlap_start:
                     for p_seg in prev_segments:
                         p_spk = p_seg.speaker_id
+                        if p_spk in {None, "UNRESOLVED", "SPEAKER_UNKNOWN"}:
+                            continue
                         p_s = max(p_seg.start_time, overlap_start)
                         p_e = min(p_seg.end_time, overlap_end)
                         if p_e <= p_s:
@@ -372,6 +382,8 @@ class LongAudioProcessor:
 
                         for c_seg in segments:
                             c_spk = c_seg.speaker_id or "SPEAKER_UNKNOWN"
+                            if c_spk in {"UNRESOLVED", "SPEAKER_UNKNOWN"}:
+                                continue
                             c_s = max(c_seg.start_time, overlap_start)
                             c_e = min(c_seg.end_time, overlap_end)
                             if c_e <= c_s:
@@ -386,7 +398,8 @@ class LongAudioProcessor:
                                 overlap_matrix[key] = overlap_matrix.get(key, 0.0) + dur
 
                 # Map current chunk's local speakers to global speakers based on highest overlap
-                curr_local_speakers = set(seg.speaker_id or "SPEAKER_UNKNOWN" for seg in segments)
+                curr_local_speakers = {seg.speaker_id for seg in segments
+                    if seg.speaker_id not in {None, "UNRESOLVED", "SPEAKER_UNKNOWN"}}
                 used_prev_speakers = set()
 
                 # Sort matches by duration descending
@@ -438,12 +451,27 @@ class LongAudioProcessor:
 
     @staticmethod
     def _text_similarity(s1: str, s2: str) -> float:
-        """Computes basic word-level Jaccard similarity between two texts."""
-        w1 = set(re.findall(r"\w+", s1.lower()))
-        w2 = set(re.findall(r"\w+", s2.lower()))
+        """Compare ordered Unicode tokens without discarding vowel marks."""
+        import unicodedata
+        from difflib import SequenceMatcher
+        def tokens(text):
+            text = unicodedata.normalize("NFC", text).casefold()
+            return "".join(c if c.isspace() or unicodedata.category(c)[0] in "LMN"
+                           else " " for c in text).split()
+        w1, w2 = tokens(s1), tokens(s2)
         if not w1 or not w2:
             return 0.0
-        return len(w1 & w2) / len(w1 | w2)
+        return SequenceMatcher(None, w1, w2, autojunk=False).ratio()
+
+    @classmethod
+    def _same_observed_turn(cls, left, right) -> bool:
+        """Only deduplicate text that also describes the same temporal event."""
+        if left.speaker_id != right.speaker_id:
+            return False
+        intersection = min(left.end_time, right.end_time) - max(left.start_time, right.start_time)
+        shorter = min(left.end_time-left.start_time, right.end_time-right.start_time)
+        return (shorter > 0 and intersection > 0 and intersection/shorter >= 0.5
+                and cls._text_similarity(left.transcript, right.transcript) >= 0.9)
 
     def merge_and_deduplicate_chunks(
         self,
@@ -507,11 +535,7 @@ class LongAudioProcessor:
                 else:
                     # Segment lies past midpoint in overlap zone, prune if duplicate exists in curr_segs
                     # Check text match in curr_segs
-                    has_match = any(
-                        self._text_similarity(seg.transcript, c.transcript) > 0.6
-                        for c in curr_segs
-                        if abs(c.start_time - seg.start_time) < 15.0
-                    )
+                    has_match = any(self._same_observed_turn(seg, c) for c in curr_segs)
                     if has_match:
                         dedup_count += 1
                         self.last_dedup_decisions.append({"segment_id": str(seg.segment_id),
@@ -530,21 +554,19 @@ class LongAudioProcessor:
                     # Check if already covered by kept_prev with high text similarity
                     is_duplicate = False
                     for prev_s in kept_prev:
-                        if abs(prev_s.start_time - seg.start_time) < 10.0:
-                            if self._text_similarity(prev_s.transcript, seg.transcript) > 0.6:
-                                is_duplicate = True
-                                dedup_count += 1
-                                self.last_dedup_decisions.append({"segment_id": str(seg.segment_id),
-                                    "chunk_index": idx, "decision": "removed_text_duplicate",
-                                    "matched_segment_id": str(prev_s.segment_id),
-                                    "start_time": seg.start_time, "end_time": seg.end_time})
-                                break
-                    if not is_duplicate and seg.start_time >= (last_kept_time - 0.2):
+                        if self._same_observed_turn(prev_s, seg):
+                            is_duplicate = True
+                            dedup_count += 1
+                            self.last_dedup_decisions.append({"segment_id": str(seg.segment_id),
+                                "chunk_index": idx, "decision": "removed_text_duplicate",
+                                "matched_segment_id": str(prev_s.segment_id),
+                                "start_time": seg.start_time, "end_time": seg.end_time})
+                            break
+                    if not is_duplicate:
                         kept_curr.append(seg)
                         last_kept_time = max(last_kept_time, seg.end_time)
-                    elif not is_duplicate:
                         self.last_dedup_decisions.append({"segment_id": str(seg.segment_id),
-                            "chunk_index": idx, "decision": "excluded_by_overlap_boundary",
+                            "chunk_index": idx, "decision": "retained_without_verified_duplicate",
                             "start_time": seg.start_time, "end_time": seg.end_time,
                             "previous_end_time": last_kept_time,
                             "duplicate_verified": False})
@@ -570,6 +592,7 @@ class LongAudioProcessor:
         initial_state: Optional[ChunkProcessingState] = None,
         correlation_id: Optional[str] = None,
         cancel_check=None,
+        transcription_context: Optional[Dict[str, Any]] = None,
     ) -> LongAudioReconstructionResult:
         """
         Main entry point for processing long audio files.
@@ -590,6 +613,10 @@ class LongAudioProcessor:
         settings = get_settings()
         state_root = Path(settings.AUDIO_CHUNK_STATE_DIR) if settings.AUDIO_CHUNK_STATE_DIR else None
         runtime_identity = execution_identity(settings)
+        from app.ai.asr_selection import batch_asr_identity
+        active_model_id = batch_asr_identity(settings)["model_id"]
+        if transcription_context is not None:
+            runtime_identity = {**runtime_identity, "transcription_context": transcription_context}
         digest = None
         history = state_root / str(meeting_id) if state_root else None
         if history:
@@ -604,7 +631,7 @@ class LongAudioProcessor:
             if initial_state and (initial_state.audio_sha256 != digest or
                 initial_state.chunk_duration_seconds != self.chunk_duration or
                 initial_state.overlap_duration_seconds != self.overlap_duration or
-                initial_state.model_id != settings.OPENMOSS_MODEL_ID or
+                initial_state.model_id != active_model_id or
                 initial_state.execution_identity != runtime_identity):
                 raise RuntimeError("Saved chunk checkpoint differs from actual audio/model/configuration; refusing stale resume")
             if initial_state:
@@ -641,7 +668,7 @@ class LongAudioProcessor:
                 chunks=chunks,
                 overall_status="processing",
                 audio_sha256=digest,
-                model_id=settings.OPENMOSS_MODEL_ID,
+                model_id=active_model_id,
                 execution_identity=runtime_identity,
             )
 
@@ -824,6 +851,7 @@ class LongAudioProcessor:
                     "chunk_duration_seconds": self.chunk_duration,
                     "overlap_duration_seconds": self.overlap_duration,
                     "deduplicated_segments_count": dedup_count,
+                    "deduplication_decisions": self.last_dedup_decisions,
                     "global_speakers": sorted(list(set(global_spk_map.values()))),
                     "provenance": "ASR:ChunkedLongAudioProcessor",
                     "chunks": [chunk.model_dump(mode="json") for chunk in state.chunks],

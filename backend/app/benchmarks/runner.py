@@ -87,19 +87,13 @@ class BenchmarkRunner:
                     "Real-data benchmark strictly forbids mock/fixture execution in REAL mode."
                 )
         else:
-            has_whisper = False
             try:
-                import faster_whisper  # type: ignore
-                has_whisper = True
-            except ImportError:
-                try:
-                    import whisper  # type: ignore
-                    has_whisper = True
-                except ImportError:
-                    pass
-            if not has_torch or not has_whisper:
+                import transformers
+            except ImportError as exc:
+                raise RuntimeError("Cached HF Whisper requires Transformers") from exc
+            if not has_torch:
                 raise RuntimeError(
-                    "Real acoustic model dependency missing: PyTorch/Whisper is not installed in the Python runtime. "
+                    "Real acoustic model dependency missing: PyTorch is not installed. "
                     "Real-data benchmark strictly forbids mock/fixture execution."
                 )
 
@@ -110,12 +104,14 @@ class BenchmarkRunner:
 
         try:
             if is_open_moss:
-                from app.ai.multilingual_asr import OpenMOSSProvider
+                from app.ai.multilingual_asr import OpenMOSSProvider, MultilingualASREngine
                 from app.ai.speaker_diarization import SpeakerDiarizationEngine
                 import asyncio
                 import uuid
                 from app.core.config import get_settings
                 settings = get_settings()
+                if settings.BATCH_ASR_PROVIDER != "moss":
+                    raise RuntimeError("MOSS benchmark requires explicit BATCH_ASR_PROVIDER=moss")
                 provider = OpenMOSSProvider({
                     "model_id": model_name,
                     "device": device,
@@ -129,38 +125,46 @@ class BenchmarkRunner:
                 result_holder = []
                 err_holder = []
                 
-                audio_payload = None
-                try:
-                    with open(sample.audio_path, "rb") as f:
-                        audio_payload = f.read()
-                except Exception as io_err:
-                    err_holder.append(io_err)
+                # ASR-only datasets do not require a diarization model call.
+                # Reference speaker counts must not silently become oracle input.
+                reference_speaker_count = None
                 
                 if not err_holder:
                     def run_async():
                         try:
                             l = asyncio.new_event_loop()
                             asyncio.set_event_loop(l)
-                            
                             # Run MOSS
-                            moss_res = l.run_until_complete(provider.transcribe(sample.audio_path))
+                            if sample.duration_seconds > settings.AUDIO_CHUNK_THRESHOLD_SECONDS:
+                                if model_name != settings.OPENMOSS_MODEL_ID or device != settings.OPENMOSS_DEVICE:
+                                    raise RuntimeError("Long MOSS benchmark must use the configured production model/device")
+                                asr_res = l.run_until_complete(MultilingualASREngine().transcribe_audio(
+                                    audio_payload=b"", audio_file_path=sample.audio_path,
+                                    meeting_id=uuid.uuid4(), use_fixture=False))
+                                moss_res = asr_res.segments
+                            else:
+                                moss_res = l.run_until_complete(provider.transcribe(sample.audio_path,
+                                    options={"language_hint": sample.language} if sample.language != "auto" else None))
                             
                             # Run PyAnnote Diarization (Experiment B)
                             pyannote_res = None
-                            if audio_payload:
+                            if sample.reference_speaker_turns:
                                 try:
                                     pyannote_res = l.run_until_complete(sd_engine.diarize_audio(
-                                        audio_payload=audio_payload,
+                                        audio_payload=b"", audio_file_path=sample.audio_path,
                                         meeting_id=uuid.uuid4(),
-                                        expected_speakers=None
+                                        expected_speakers=reference_speaker_count
                                     ))
+                                    pyannote_res = sd_engine.repair_saved_diarization(pyannote_res)
                                 except Exception as sd_err:
                                     raise RuntimeError("Required REAL PyAnnote inference failed") from sd_err
                             
                             result_holder.append((moss_res, pyannote_res))
-                            l.close()
                         except Exception as ex:
                             err_holder.append(ex)
+                        finally:
+                            if 'l' in locals():
+                                l.close()
                     t = threading.Thread(target=run_async)
                     t.start()
                     t.join()
@@ -204,7 +208,9 @@ class BenchmarkRunner:
                             "speaker": t.speaker_id,
                             "start_time": t.start_time,
                             "end_time": t.end_time,
-                        } for t in pyannote_res.speaker_turns]
+                        } for t in pyannote_res.speaker_turns],
+                        "expected_speakers": reference_speaker_count,
+                        "speaker_count_source": "model inferred; reference count not supplied",
                     }
                     
                     verification_report = sd_engine.verify_moss_with_pyannote(
@@ -229,31 +235,35 @@ class BenchmarkRunner:
                             print(f"    * {diag['message']}")
                     print("="*50 + "\n")
             else:
-                import whisper  # type: ignore
-                model = whisper.load_model(model_name, device=device)
-                result = model.transcribe(
-                    sample.audio_path,
-                    language=sample.language if sample.language != "auto" else None,
-                    word_timestamps=True,
-                )
-                predicted_text = result.get("text", "").strip()
+                import asyncio
+                import uuid
+                from concurrent.futures import ThreadPoolExecutor
+                from app.core.config import get_settings
+                from app.ai.multilingual_asr import MultilingualASREngine
+                settings = get_settings()
+                if (settings.BATCH_ASR_PROVIDER != "whisper" or model_name != settings.WHISPER_MODEL_ID
+                        or device != settings.OPENMOSS_DEVICE):
+                    raise RuntimeError("Whisper benchmark requires explicitly configured HF model/device/provider; no download or fallback")
+                def run_whisper():
+                    return asyncio.run(MultilingualASREngine().transcribe_audio(
+                        audio_payload=b"", audio_file_path=sample.audio_path,
+                        target_languages=[sample.language] if sample.language != "auto" else None,
+                        meeting_id=uuid.uuid4(), use_fixture=False))
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    result = pool.submit(run_whisper).result()
+                predicted_text = result.full_transcript
 
-                for seg in result.get("segments", []):
-                    s_start = float(seg.get("start", 0.0))
-                    s_end = float(seg.get("end", 0.0))
-                    s_text = seg.get("text", "").strip()
+                for seg in result.segments:
+                    s_start = seg.start_time
+                    s_end = seg.end_time
+                    s_text = seg.transcript
                     predicted_segments.append({
                         "start_time": s_start,
                         "end_time": s_end,
                         "text": s_text,
-                        "speaker": "speaker_0",
+                        "speaker": "UNRESOLVED",
                     })
-                    predicted_turns.append({
-                        "speaker": "speaker_0",
-                        "start_time": s_start,
-                        "end_time": s_end,
-                        "duration": round(s_end - s_start, 3),
-                    })
+                # Whisper does not infer speaker identity. No fabricated DER/JER turns.
         except Exception as model_ex:
             raise RuntimeError(f"Real model inference failed: {model_ex}") from model_ex
 
@@ -434,7 +444,7 @@ class BenchmarkRunner:
                     wer_values.append(rec.wer)
 
                 # Diarization DER computation
-                if sample.reference_speaker_turns:
+                if sample.reference_speaker_turns and rec.predicted_turns:
                     rec.ground_truth_turns = sample.reference_speaker_turns
                     der_res = calculate_der(
                         sample.reference_speaker_turns,

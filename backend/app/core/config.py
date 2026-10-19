@@ -157,8 +157,14 @@ class Settings(BaseSettings):
     GEMINI_MAX_INPUT_CHARACTERS: int = Field(default=120000, ge=1000, le=1000000)
     GEMINI_MAX_OUTPUT_TOKENS: int = Field(default=8192, ge=256, le=65536)
     OPENMOSS_MODEL_ID: str = "OpenMOSS-Team/MOSS-Transcribe-Diarize"
+    BATCH_ASR_PROVIDER: Literal["moss", "whisper"] = "moss"
+    WHISPER_MODEL_ID: str = "openai/whisper-large-v3"
+    WHISPER_PRECISION: Literal["fp16", "bf16"] = "fp16"
+    WHISPER_CHUNK_DURATION_SECONDS: float = Field(default=25.0, gt=0, le=30)
+    WHISPER_CHUNK_OVERLAP_SECONDS: float = Field(default=5.0, gt=0)
+    WHISPER_WORKER_CUDA_BUDGET_MB: int = Field(default=8192, gt=0)
     OPENMOSS_DEVICE: str = "cpu"  # cpu, cuda, auto
-    OPENMOSS_PRECISION: Literal["nf4", "dynamic_int8", "fp32"] = "nf4"
+    OPENMOSS_PRECISION: Literal["nf4", "bf16", "dynamic_int8", "fp32"] = "nf4"
     OPENMOSS_MAX_NEW_TOKENS: int = 5120
     OPENMOSS_CACHE_DIR: Optional[str] = None
     SARVAM_QUANTIZED_MODEL_PATH: Optional[str] = None
@@ -206,6 +212,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_chunk_profile(self):
+        if self.WHISPER_CHUNK_OVERLAP_SECONDS >= self.WHISPER_CHUNK_DURATION_SECONDS:
+            raise ValueError("Whisper overlap must be smaller than its bounded chunk duration")
         if self.AUDIO_CHUNK_OVERLAP_SECONDS >= self.AUDIO_CHUNK_DURATION_SECONDS:
             raise ValueError("Audio chunk overlap must be smaller than chunk duration")
         if self.AUDIO_CHUNK_THRESHOLD_SECONDS > self.AUDIO_CHUNK_DURATION_SECONDS:

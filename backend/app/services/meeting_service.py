@@ -375,7 +375,8 @@ class MeetingService:
                                    if getattr(task.status, "value", task.status) == "COMPLETED"}
                 if final_status == "completed" or self._required_transcript_stages <= completed_audio:
                     await self._persist_real_transcript(meeting, blackboard, ace_req.correlation_id,
-                                                        processing_status=final_status)
+                                                        processing_status=final_status,
+                                                        publish_speaker_revision=bool(req.force_reprocess))
 
             meeting.status = final_status
             await self.meeting_repo.update(meeting)
@@ -457,6 +458,19 @@ class MeetingService:
         duration = outputs.get("audio_intelligence", {}).get("duration_seconds", 0)
         if not segments or duration <= 0:
             raise RuntimeError("REAL persistence requires non-empty observed transcript and audio duration")
+        from app.ai.speaker_diarization import DiarizationResult
+        if outputs.get("speaker_representation", {}).get("speaker_turns"):
+            diarization = dict(outputs["speaker_representation"])
+            if diarization.get("meeting_id") and uuid.UUID(str(diarization["meeting_id"])) != meeting.id:
+                raise RuntimeError("Saved diarization belongs to a different meeting")
+            # Older provider payloads omitted request context and used the
+            # legacy confidence key. Restore context without inventing scores.
+            diarization["meeting_id"] = meeting.id
+            diarization.setdefault("num_speakers", len({t["speaker_id"] for t in diarization["speaker_turns"]}))
+            diarization.setdefault("overall_confidence", diarization.get("diarization_confidence"))
+            repaired = SpeakerDiarizationEngine.repair_saved_diarization(
+                DiarizationResult.model_validate(diarization))
+            outputs = {**outputs, "speaker_representation": repaired.model_dump(mode="json")}
         comparison = SpeakerDiarizationEngine().verify_moss_with_pyannote(segments,
             outputs.get("speaker_representation", {}).get("speaker_turns", []))
         comparison["agreement_ratio"] = comparison.pop("accuracy", None)
@@ -466,7 +480,7 @@ class MeetingService:
         if chunk_count > 1:
             mapping = asr.get("metadata", {}).get("speaker_mapping", {})
             removed = asr.get("metadata", {}).get("deduplicated_segments_count", 0)
-        if chunk_count == 1:
+        if chunk_count == 1 and asr.get("metadata", {}).get("provider") != "whisper":
             chunks = processor.plan_chunks(duration)
             if len(chunks) != 1:
                 raise RuntimeError("Single-pass ASR output disagrees with chunk planning")
@@ -500,7 +514,8 @@ class MeetingService:
             await repository.bulk_create_segments([TranscriptSegment(id=s.segment_id, meeting_id=meeting.id,
                 start_time_ms=round(s.start_time*1000), end_time_ms=round(s.end_time*1000),
                 original_text=s.transcript, speaker_label=s.speaker_id, sequence_number=index+1,
-                language=s.detected_language or "und", confidence=s.confidence, words_payload=[], is_final=True)
+                language=s.detected_language or "und", confidence=s.confidence,
+                words_payload=[w.model_dump(mode="json") for w in s.words], is_final=True)
                 for index, s in enumerate(segments)])
         full_text = " ".join(s.transcript for s in segments)
         transcripts = TranscriptRepository(self.db)
@@ -524,8 +539,19 @@ class MeetingService:
                     "meeting_processing_status": processing_status,
                     "stage_statuses": [{k: stage[k] for k in ("id", "capability", "status")} for stage in stages],
                     "quality_warnings": overlap.get("warnings", [])}))
-        if outputs.get("meeting_analytics"):
-            await self.persist_real_analytics(meeting.id, outputs["meeting_analytics"])
+        analytics_output = outputs.get("meeting_analytics")
+        if analytics_output is None and publish_speaker_revision:
+            from app.repositories.analytics_repo import AnalyticsRepository
+            previous_analytics = await AnalyticsRepository(self.db).get_by_meeting_id(meeting.id)
+            analytics_output = previous_analytics.summary_metrics if previous_analytics else None
+        if analytics_output:
+            from app.ai.meeting_analytics import MeetingAnalyticsEngine, MeetingAnalyticsResult
+            previous_measures = MeetingAnalyticsResult.model_validate(analytics_output)
+            aligned = MeetingAnalyticsEngine().compute_analytics(meeting.id,
+                speaker_turns=[s.model_dump(mode="json") for s in segments],
+                meeting_duration_seconds=duration, correlation_id=str(correlation_id))
+            measures = previous_measures.model_copy(update={"speaker_participation": aligned.speaker_participation})
+            await self.persist_real_analytics(meeting.id, measures.model_dump(mode="json"))
         meeting.settings = {**(meeting.settings or {}), "audio_duration_seconds": duration}
         meeting.status = processing_status
         await self.db.commit()
@@ -561,7 +587,11 @@ class MeetingService:
         return await AnalyticsRepository(self.db).upsert_for_meeting(meeting_id,
             speaking_time_distribution={row.speaker_id: row.speaking_duration_seconds for row in measured.speaker_participation},
             turn_taking_metrics={row.speaker_id: {"turn_count": row.turn_count} for row in measured.speaker_participation},
-            summary_metrics={**measured.model_dump(mode="json"), "speaker_identity_accuracy": "NOT VERIFIED"})
+            summary_metrics={**measured.model_dump(mode="json"), "speaker_identity_accuracy": "NOT VERIFIED",
+                "model_speaker_group_count": sum(row.speaker_id.startswith("pyannote_global_") for row in measured.speaker_participation),
+                "unresolved_turn_count": sum(row.turn_count for row in measured.speaker_participation if row.speaker_id == "UNRESOLVED"),
+                "participant_count": None,
+                "speaker_labels_scope": "model_groups_and_unresolved_bucket"})
 
     async def schedule_meeting(
         self,

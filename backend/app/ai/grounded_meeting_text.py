@@ -1,12 +1,64 @@
 """Gemini extraction with validated citations to actual transcript turns."""
 from fastapi import HTTPException
 from app.ai.gemini_text import GeminiTextProvider
+import json
 
 TYPES = ["summary", "decision", "action_item", "topic", "fact", "hypothesis"]
-EXTRACTION_VERSION = "grounded-summary-v2"
+EXTRACTION_VERSION = "grounded-summary-v3-bounded"
+
+
+def plan_text_batches(turns: list[dict], limit: int) -> list[list[dict]]:
+    """Keep complete, ordered source turns within the provider's exact JSON budget."""
+    if not turns or any(not t.get("segment_id") or not str(t.get("text", "")).strip() for t in turns):
+        raise HTTPException(422, "Grounded extraction requires non-empty transcript turns with source identifiers")
+    if len({str(t["segment_id"]) for t in turns}) != len(turns):
+        raise HTTPException(422, "Grounded extraction requires unique source identifiers")
+    batches, batch = [], []
+    size = len(json.dumps({"turns": []}, ensure_ascii=False))
+    empty_size = size
+    for turn in turns:
+        turn_size = len(json.dumps(turn, ensure_ascii=False))
+        if empty_size + turn_size > limit:
+            raise HTTPException(422, "A complete transcript turn exceeds the Gemini input limit; no text was truncated or sent")
+        added = turn_size + (2 if batch else 0)
+        if size + added > limit:
+            batches.append(batch)
+            batch, size = [], empty_size
+            added = turn_size
+        batch.append(turn)
+        size += added
+    if batch:
+        batches.append(batch)
+    return batches
 
 
 async def extract_meeting_items(turns: list[dict]) -> tuple[list[dict], dict]:
+    from app.core.config import get_settings
+    batches = plan_text_batches(turns, get_settings().GEMINI_MAX_INPUT_CHARACTERS)
+    if len(batches) == 1:
+        return await _extract_batch(batches[0])
+    items, calls = [], []
+    for index, batch in enumerate(batches):
+        extracted, call = await _extract_batch(batch)
+        scope = {"batch_index": index, "batch_count": len(batches),
+                 "source_segments": [str(t["segment_id"]) for t in batch],
+                 "start_ms": batch[0]["start_ms"], "end_ms": batch[-1]["end_ms"],
+                 "summary_scope": "transcript_window", "whole_meeting_summary": False}
+        call = {**call, "text_window": scope}
+        calls.append(call)
+        for item in extracted:
+            # These summaries describe only this input window, not the full meeting.
+            if item["object_type"] == "summary":
+                item["title"] = f"Window {index + 1}/{len(batches)}: {item['title']}"[:255]
+            items.append({**item, "generation_metadata": call})
+    return items, {"provider": "gemini", "model": calls[0]["model"],
+                   "execution_mode": "REAL", "is_fixture": False,
+                   "extraction_version": EXTRACTION_VERSION, "batch_count": len(batches),
+                   "summary_scope": "transcript_windows", "whole_meeting_summary": False,
+                   "elapsed_seconds": sum(c["elapsed_seconds"] for c in calls), "calls": calls}
+
+
+async def _extract_batch(turns: list[dict]) -> tuple[list[dict], dict]:
     if not turns or any(not t.get("segment_id") or not str(t.get("text", "")).strip() for t in turns):
         raise HTTPException(422, "Grounded extraction requires non-empty transcript turns with source identifiers")
     sources = {str(t["segment_id"]): t for t in turns}

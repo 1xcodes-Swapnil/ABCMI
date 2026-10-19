@@ -6,6 +6,7 @@ with Hungarian maximum matching and evaluation collar, and boundary alignment er
 
 import math
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -26,13 +27,18 @@ class BenchmarkMetrics:
 
 
 def normalize_text(text: str, remove_punctuation: bool = True) -> str:
-    """Normalize text for consistent phonetic/lexical evaluation."""
+    """Normalize literal text without deleting multilingual combining marks.
+
+    No translation or transliteration: script differences remain measurable.
+    """
     if not text:
         return ""
-    text = text.strip().lower()
+    text = unicodedata.normalize("NFC", text).strip().casefold()
     if remove_punctuation:
-        # Keep alphanumeric, whitespace, and non-ASCII Unicode characters (for Asian/Indic)
-        text = re.sub(r"[^\w\s\u0400-\u04FF\u0600-\u06FF\u0900-\u097F\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]", " ", text)
+        # \w excludes combining marks in many Indic/Arabic scripts. Preserve
+        # all letters, marks and numbers instead of a partial Unicode block list.
+        text = "".join(c if c.isspace() or unicodedata.category(c)[0] in "LMN"
+                       else " " for c in text)
     # Collapse multiple whitespaces
     text = re.sub(r"\s+", " ", text).strip()
     return text
