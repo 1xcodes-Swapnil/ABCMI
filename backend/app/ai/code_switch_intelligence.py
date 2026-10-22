@@ -15,6 +15,27 @@ from app.schemas.base import CoreBaseModel
 logger = get_logger("ai.code_switch_intelligence")
 
 
+def declared_english_identity(transcript, segments, declared_languages, observed_languages=None):
+    """Same-language identity, never language detection or a generation fallback.
+
+    Only an explicit English-only request qualifies. Unknown/mixed/contradictory
+    language metadata must continue through the configured actual provider.
+    """
+    def codes(values):
+        return {str(v).strip().lower().replace("-", "_").split("_")[0] for v in (values or [])}
+    if codes(declared_languages) != {"en"} or codes(observed_languages) - {"en"}:
+        return None
+    return {"original_text": transcript, "canonical_text": transcript,
+            "normalized_turns": [{"segment_id": s.get("segment_id"),
+                "original_text": s["transcript"], "canonical_text": s["transcript"],
+                "inference": {"generation_executed": False, "operation": "declared_same_language_identity"}}
+                for s in segments if s.get("transcript", "").strip()],
+            "representation": "original_language_identity",
+            "translation_status": "NOT_REQUESTED_FOR_DECLARED_ENGLISH",
+            "declared_source_languages": list(declared_languages),
+            "model": None, "language_detection": "NOT_VERIFIED", "generation_executed": False}
+
+
 class CodeSwitchBoundary(CoreBaseModel):
     """Marks a transition point between languages within a code-switched utterance."""
     token_index: int = Field(..., ge=0, description="Index of the boundary token")
@@ -22,7 +43,7 @@ class CodeSwitchBoundary(CoreBaseModel):
     end_time: Optional[float] = Field(default=None, ge=0.0)
     source_language: str = Field(..., description="Language preceding transition")
     target_language: str = Field(..., description="Language following transition")
-    confidence: float = Field(default=0.90, ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class NormalizedRepresentation(CoreBaseModel):
@@ -32,7 +53,7 @@ class NormalizedRepresentation(CoreBaseModel):
     canonical_text: str = Field(..., description="Language-agnostic English translation / semantic mapping")
     source_languages: List[str] = Field(default_factory=list)
     code_switch_boundaries: List[CodeSwitchBoundary] = Field(default_factory=list)
-    confidence: float = Field(default=0.90, ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class CodeSwitchIntelligenceEngine:
@@ -170,6 +191,8 @@ class CodeSwitchIntelligenceEngine:
         """
         Detects language switch points within mixed utterances across supported languages.
         """
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            raise RuntimeError("REAL code-switch boundary detection requires a validated LID provider; keyword fixtures are forbidden")
         if not text:
             return []
 
@@ -209,6 +232,11 @@ class CodeSwitchIntelligenceEngine:
         """
         if not text:
             raise ValueError("Text for normalization cannot be empty.")
+
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            return NormalizedRepresentation(original_text=text, normalized_text=text,
+                canonical_text=await self.map_to_canonical(text), source_languages=[],
+                code_switch_boundaries=[], confidence=None)
 
         boundaries = await self.detect_boundaries(text)
         canonical = await self.map_to_canonical(text)
@@ -264,13 +292,21 @@ class CodeSwitchIntelligenceEngine:
                         "generated_tokens": int(outputs.shape[1] - inputs["input_ids"].shape[1]),
                         "device": str(next(self.model.parameters()).device), "raw_output_exists": bool(decoded),
                         "task_mode": "bounded_text_completion", "normalization_accuracy": "NOT_VERIFIED"}
+                    if self.last_inference["generated_tokens"] >= self.config.get("max_new_tokens", 100):
+                        raise ValueError("Sarvam reached its token limit; incomplete translation cannot be accepted")
                     if "\n" in decoded:
                         raise ValueError("Sarvam returned multiple records despite the completion boundary")
                     if decoded:
                         return decoded
                     raise ValueError("REAL Sarvam-1 generated empty output")
                 except Exception as infer_err:
-                    raise RuntimeError("REAL Sarvam-1 generation failed; heuristic fallback is forbidden") from infer_err
+                    # Preserve controlled failure reasons without exposing input text
+                    # or arbitrary dependency diagnostics in the API response.
+                    known = {"Sarvam reached its token limit; incomplete translation cannot be accepted",
+                             "Sarvam returned multiple records despite the completion boundary",
+                             "REAL Sarvam-1 generated empty output"}
+                    reason = str(infer_err) if str(infer_err) in known else type(infer_err).__name__
+                    raise RuntimeError(f"REAL Sarvam-1 generation failed ({reason}); heuristic fallback is forbidden") from infer_err
             raise RuntimeError("REAL Sarvam-1 model and tokenizer are unavailable")
 
         replacements = {
@@ -305,6 +341,8 @@ class CodeSwitchIntelligenceEngine:
         """
         Processes ASR result payload into a NormalizedRepresentation.
         """
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            raise RuntimeError("REAL translation requires async normalize_text; fixture word substitutions are forbidden")
         text = getattr(asr_result, "full_transcript", "") or str(asr_result)
         words = text.split()
         boundaries: List[CodeSwitchBoundary] = []

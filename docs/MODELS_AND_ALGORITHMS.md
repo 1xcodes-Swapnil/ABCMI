@@ -4,6 +4,34 @@
 *Document Version:* 2.0.0  
 *Classification:* Technical & Algorithmic Architecture Specification
 
+> Implementation notice (2026-10-20): This is the initial design specification.
+> Its named algorithms and numerical performance claims are not all implemented
+> or verified. See [implementation status](ARCHITECTURE_IMPLEMENTATION_STATUS.md)
+> for actual interfaces, differences, and required accuracy gates.
+
+### Final-test implementation clarification — 21 October 2026
+
+The numerical WER/DER/JER/LID/latency figures below are **unverified design
+targets**, not measured results or guarantees. Merely adding the named formulas
+does not implement or validate the corresponding trained model.
+
+| Design item | Actual production implementation / limitation |
+|---|---|
+| VAD | Local Silero integration exists, with observable energy/entropy and bounded original-audio windows. Filtering requires validation; it cannot correct speech recognition errors. |
+| MOSS ASR | Native MOSS processor and tagged output parser; the cached conditional-generation model uses a Qwen text configuration. It is not the Conformer CTC encoder described below. No implicit Whisper fallback. |
+| Speaker diarization | PyAnnote speaker-diarization-3.1 and acoustic voice matching. The saved inspected embeddings have 256 dimensions; no EEND-EDA/192-dimensional ECAPA implementation is established. |
+| Overlap | Actual interval detection and explicit unresolved status; no trained PIT separation provider is installed. Original words are retained, without invented separated hypotheses. |
+| Boundary deduplication | Requires observed timing/text and identified matching speakers. Equal UNKNOWN/UNRESOLVED labels do not establish the same human identity. Ambiguous turns remain reviewable. |
+| Timestamp alignment | Existing model timestamps and structural validation; independent language-specific acoustic DTW/forced alignment is not verified. |
+| Multilingual / LID | Declared-language script checks are output validation, not acoustic language identification. Sarvam is a separate text model; translation cannot repair canonical recognized speech. The proposed calibrated window LID is not implemented. |
+| Recording-end recovery | Final chunk now has a bounded original-audio format retry instead of requiring nonexistent following audio. Contract tests pass; fresh REAL inference of this fix is not verified. |
+| Research identity | New uploads retain a streamed SHA-256 in existing audio metadata. Older missing hashes are not backfilled from guessed filenames. |
+
+Saved manual results and qualifications:
+`benchmark results/manual_final_20261021/evaluation_01/REPORT.md`.
+These convenience tests are not a new held-out acceptance set. Missing ground
+truth, lost audio identity, unresolved speakers and failed attempts remain explicit.
+
 ---
 
 ## 1. Executive Summary & Algorithmic Taxonomy

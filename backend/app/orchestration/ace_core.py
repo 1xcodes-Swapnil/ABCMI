@@ -307,6 +307,9 @@ class TaskPlanner:
             enable_analytics=enable_analytics,
             enable_memory=enable_memory,
         )
+        for task in tasks:
+            if task.required_capability == "multilingual_asr":
+                task.input_data["target_languages"] = list(getattr(request, "target_languages", []) or [])
         return ACETaskPlan(planner_id="ace_default_planner", tasks=tasks)
 
 

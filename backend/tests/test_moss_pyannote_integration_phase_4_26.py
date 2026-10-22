@@ -4,6 +4,7 @@ Phase 4.26 — Open-MOSS and pyannote Integration & Research Evaluation Test Sui
 
 import uuid
 import pytest
+import numpy as np
 from unittest.mock import patch, MagicMock
 
 from app.core.config import get_settings
@@ -148,3 +149,34 @@ def test_model_verification_moss_service():
     assert "blocked" in hw_info
     assert "status_code" in hw_info
     assert "message" in hw_info
+
+
+def test_bounded_global_clustering_honors_reference_speaker_count():
+    class FakeClustering:
+        def __init__(self):
+            self.requested = None
+
+        def cluster(self, vectors, min_clusters, max_clusters, num_clusters):
+            self.requested = (min_clusters, max_clusters, num_clusters)
+            return np.array([0, 1, 2, 3])
+
+    clustering = FakeClustering()
+    observations = [(
+        0,
+        ["S0", "S1", "S2", "S3"],
+        np.eye(4, dtype=np.float32),
+    )]
+    mappings, centroids, _ = SpeakerDiarizationEngine._cluster_window_speakers(
+        clustering,
+        observations,
+        expected_speakers=4,
+    )
+
+    assert clustering.requested == (4, 4, 4)
+    assert set(mappings.values()) == {
+        "pyannote_global_0",
+        "pyannote_global_1",
+        "pyannote_global_2",
+        "pyannote_global_3",
+    }
+    assert len(centroids) == 4

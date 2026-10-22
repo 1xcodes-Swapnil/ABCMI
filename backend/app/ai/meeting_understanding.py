@@ -123,7 +123,12 @@ class MeetingUnderstandingEngine:
             knowledge_objects, extracted_items = [knowledge], [item]
             counts = {"transcript_insight": 1}
             generation = None
-            if get_settings().TEXT_AI_PROVIDER.lower() == "gemini":
+            if (get_settings().TEXT_AI_PROVIDER.lower() == "gemini"
+                    and not context.get("canonical_transcript_id")):
+                generation = {"status": "DEFERRED", "provider": "gemini",
+                    "reason": "Persist and read back the audio transcript before using the existing intelligence job",
+                    "semantic_accuracy": "NOT_VERIFIED"}
+            elif get_settings().TEXT_AI_PROVIDER.lower() == "gemini":
                 from app.ai.grounded_meeting_text import extract_meeting_items
                 candidates, generation = await extract_meeting_items(context.get("turns", []))
                 for candidate in candidates:

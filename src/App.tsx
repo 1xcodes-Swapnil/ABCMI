@@ -53,11 +53,11 @@ export default function App() {
   const liveBusy = useRef(false);
   const sessionEpoch = useRef(0);
   function setActiveTab(next:any) {
-    if (liveBusy.current) {setError('Stop capture and finish pending uploads before leaving the live tab.'); return;}
+    if (liveBusy.current) {setError('Stop capture and upload all audio held in this browser tab before leaving. Server processing can continue after upload.'); return;}
     updateActiveTab(next);
   }
   function selectMeeting(id:string) {
-    if (liveBusy.current) {setError('Finish live capture and pending uploads before changing meetings.'); return;}
+    if (liveBusy.current) {setError('Stop capture and upload all audio held in this browser tab before changing meetings.'); return;}
     setSelectedMeetingId(id);
   }
   useEffect(() => {

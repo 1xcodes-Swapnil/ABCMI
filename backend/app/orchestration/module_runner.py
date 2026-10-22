@@ -53,10 +53,14 @@ class AIModuleRunner:
 
     def inject_task_confidence(self, task_id: uuid.UUID, confidence_score: float) -> None:
         """Inject a specific confidence score output for a task (used in testing)."""
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            raise ValueError("REAL mode forbids injected confidence")
         self._injected_confidences[task_id] = confidence_score
 
     def inject_task_error(self, task_id: uuid.UUID, error_message: str) -> None:
         """Inject a failure for a specific task (used in testing retry/recovery)."""
+        if get_settings().EXECUTION_MODE.upper() == "REAL":
+            raise ValueError("REAL mode forbids test error injection")
         self._injected_errors[task_id] = error_message
 
     async def execute_task(
@@ -72,6 +76,9 @@ class AIModuleRunner:
         Dispatch task execution to the module handler for the given capability.
         Returns execution result dict containing status, confidence, and output payload.
         """
+        real = get_settings().EXECUTION_MODE.upper() == "REAL"
+        if real and (task_id in self._injected_errors or task_id in self._injected_confidences):
+            raise ValueError("REAL mode forbids test overrides")
         # Check injected error test override
         if task_id in self._injected_errors:
             err_msg = self._injected_errors.pop(task_id)
@@ -96,7 +103,9 @@ class AIModuleRunner:
             # Apply confidence override if injected
             if task_id in self._injected_confidences:
                 result["confidence_score"] = self._injected_confidences.pop(task_id)
-            return result
+            from app.orchestration.module_contracts import validate_module_result
+            return validate_module_result(result, capability=capability, meeting_id=meeting_id,
+                request_id=request_id, task_id=task_id, correlation_id=correlation_id, require_json=real)
         except Exception as ex:
             logger.error(f"Error during module execution for capability '{capability}': {ex}")
             raise
@@ -147,9 +156,20 @@ class AIModuleRunner:
                     if not transcript:
                         raise ValueError("REAL meeting understanding requires the actual transcript")
                     context = upstream.get("context_intelligence", {}).get("metadata", {})
-                    context = {**context, "turns": [{"segment_id": str(s["segment_id"]),
+                    # Preserve original source IDs/text while using the same
+                    # observed speaker reconciliation as transcript context.
+                    reconciled_speakers = {
+                        str(source): segment.get("speaker_id")
+                        for segment in upstream.get("transcript_intelligence", {}).get("cleaned_segments", [])
+                        for source in segment.get("source_segment_ids", [])}
+                    context = {**context, "model_name": upstream.get("multilingual_asr", {}).get("metadata", {}).get("model_name"),
+                        "source_segments": [str(s["segment_id"]) for s in upstream.get("multilingual_asr", {}).get("segments", [])],
+                        "source_intervals": [{"start_ms": round(s["start_time"] * 1000), "end_ms": round(s["end_time"] * 1000)}
+                            for s in upstream.get("multilingual_asr", {}).get("segments", [])],
+                        "turns": [{"segment_id": str(s["segment_id"]),
                         "text": s["transcript"], "start_ms": s["start_time"] * 1000,
-                        "end_ms": s["end_time"] * 1000, "speaker": s.get("speaker_id")}
+                        "end_ms": s["end_time"] * 1000,
+                        "speaker": reconciled_speakers.get(str(s["segment_id"]), "UNRESOLVED")}
                         for s in upstream.get("multilingual_asr", {}).get("segments", [])]}
                     result = await MeetingUnderstandingEngine().analyze_meeting(uuid.UUID(str(meeting_id)),
                         transcript, context_data=context, correlation_id=correlation_id, use_fixture=False)
@@ -195,9 +215,16 @@ class AIModuleRunner:
                     segments = [ASRSegment.model_validate(s) for s in asr.get("segments", [])]
                     if not segments:
                         raise ValueError("REAL transcript intelligence requires actual ASR segments")
+                    from app.ai.speaker_diarization import SpeakerDiarizationEngine, DiarizationResult
+                    diarization = DiarizationResult.model_validate(upstream.get("speaker_representation", {}))
+                    if diarization.meeting_id != uuid.UUID(str(meeting_id)):
+                        raise ValueError("REAL transcript context received another meeting's diarization")
+                    diarization = SpeakerDiarizationEngine.repair_saved_diarization(diarization)
+                    segments, speaker_evidence = SpeakerDiarizationEngine().reconcile_moss_identities(
+                        segments, diarization.speaker_turns)
                     asr_result = ASRResult(meeting_id=uuid.UUID(str(meeting_id)),
                         full_transcript=asr["transcript"], segments=segments, overall_confidence=None,
-                        metadata={**asr.get("metadata", {}),
+                        metadata={**asr.get("metadata", {}), "speaker_reconciliation": speaker_evidence,
                                   "provenance": "REAL selected ASR; model identity retained from provider"})
                     result = await TranscriptIntelligenceEngine().process_transcript(asr_result, correlation_id=correlation_id)
                     if not result.cleaned_segments:
@@ -223,7 +250,7 @@ class AIModuleRunner:
                                             "validated_segment_count": len(segments)},
                             "correlation_id": correlation_id}
                 if cap == "code_switch_intelligence":
-                    from app.ai.code_switch_intelligence import CodeSwitchIntelligenceEngine
+                    from app.ai.code_switch_intelligence import CodeSwitchIntelligenceEngine, declared_english_identity
                     upstream = input_data.get("upstream_results", {})
                     transcript = upstream.get("multilingual_asr", {}).get("transcript")
                     if not transcript:
@@ -231,6 +258,14 @@ class AIModuleRunner:
                     observed_segments = upstream.get("multilingual_asr", {}).get("segments", [])
                     if not observed_segments:
                         raise ValueError("REAL normalization requires actual ASR turns")
+                    declared = input_data.get("target_languages")
+                    if not declared:
+                        declared = upstream.get("multilingual_asr", {}).get("metadata", {}).get("declared_languages", [])
+                    identity_result = declared_english_identity(transcript, observed_segments, declared,
+                        upstream.get("multilingual_asr", {}).get("detected_languages", []))
+                    if identity_result is not None:
+                        return {"status": "SUCCESS", "capability": cap, "confidence_score": None,
+                                "result_data": identity_result, "correlation_id": correlation_id}
                     engine = CodeSwitchIntelligenceEngine()
                     # Keep genuine completed text generations across worker loss.
                     # Bind them to input, model revision, runtime and producer code.
@@ -285,7 +320,9 @@ class AIModuleRunner:
                     return {"status": "SUCCESS", "capability": cap, "confidence_score": None,
                             "result_data": {"original_text": transcript, "canonical_text": canonical,
                                             "normalized_turns": normalized_turns,
-                                            "model": "sarvamai/sarvam-1", "language_detection": "NOT_VERIFIED"},
+                                            "representation": "derived_english_translation",
+                                            "translation_accuracy": "NOT_VERIFIED",
+                                            "model": engine.config["model_id"], "language_detection": "NOT_VERIFIED"},
                             "correlation_id": correlation_id}
                 if cap == "overlap_resolution":
                     from app.ai.overlap_resolution import OverlapResolutionEngine
@@ -340,6 +377,7 @@ class AIModuleRunner:
                                 "confidence_score": 1.0,
                                 "result_data": {
                                     "raw_audio_processed": True,
+                                    "meeting_id": str(meeting_id),
                                     "duration_seconds": meta["duration"],
                                     "sample_rate": meta["sample_rate"],
                                     "channels": meta["channels"]
@@ -369,9 +407,10 @@ class AIModuleRunner:
                             "capability": cap,
                             "confidence_score": asr_res.overall_confidence,
                             "result_data": {
+                                "meeting_id": str(asr_res.meeting_id),
                                 "transcript": asr_res.full_transcript,
                                 "language": asr_res.detected_languages[0] if asr_res.detected_languages else None,
-                                "segments": [s.model_dump() for s in asr_res.segments],
+                                "segments": [s.model_dump(mode="json") for s in asr_res.segments],
                                 "detected_languages": asr_res.detected_languages,
                                 "language_distribution": asr_res.language_distribution,
                                 "metadata": asr_res.metadata,
@@ -402,8 +441,8 @@ class AIModuleRunner:
                                 "overall_confidence": sd_res.overall_confidence,
                                 "speakers": list(set(t.speaker_id for t in sd_res.speaker_turns)),
                                 "diarization_confidence": sd_res.overall_confidence,
-                                "speaker_turns": [t.model_dump() for t in sd_res.speaker_turns],
-                                "voiceprints": [v.model_dump() for v in sd_res.voiceprints],
+                                "speaker_turns": [t.model_dump(mode="json") for t in sd_res.speaker_turns],
+                                "voiceprints": [v.model_dump(mode="json") for v in sd_res.voiceprints],
                                 "metadata": sd_res.metadata,
                             },
                             "correlation_id": correlation_id,

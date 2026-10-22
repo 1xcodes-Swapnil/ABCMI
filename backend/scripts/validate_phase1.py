@@ -322,6 +322,8 @@ def execute(run):
                         continue
                     streams.append((handler,prior_stream))
         sys.argv=["abcimi","--title",preflight.get("title","Phase 1 REAL multi-chunk production")]
+        if preflight.get("language"):
+            sys.argv += ["--language", preflight["language"]]
         if preflight.get("resume_meeting_id"):
             sys.argv += ["--meeting-id",preflight["resume_meeting_id"]]
         else:

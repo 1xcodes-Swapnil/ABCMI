@@ -98,7 +98,7 @@ export function WorkspacePanels(props: Props) {
       {tab === 'translations' && <Translations id={meetingId}/>}
       {tab === 'reports' && <Reports id={meetingId}/>}
     </div>}
-    {tab === 'benchmarks' && <><Remote path="/benchmarks/runs" title="Persisted benchmark runs"/><Remote path="/benchmarks/datasets" title="Dataset adapters & execution requirements"/><p className="text-sm text-slate-400">Missing accuracy values are unknown. Benchmark execution remains in the existing CLI pending dataset and ground-truth validation.</p></>}
+    {tab === 'benchmarks' && <><p className="text-sm text-slate-300">Calculated evidence below reports saved evaluation results and their verification status. Dataset adapters are a capability catalog; their presence does not mean those datasets were tested. Uploaded meetings are not accuracy benchmarks without matched ground truth.</p><Remote path="/benchmarks/evidence" title="Calculated benchmark evidence"/><Remote path="/benchmarks/runs" title="Persisted benchmark runs"/><details className={panel}><summary className="cursor-pointer">Dataset adapter catalog · not tested coverage</summary><Remote path="/benchmarks/datasets" title="Dataset adapters & execution requirements"/></details><p className="text-sm text-slate-400">Missing or unverified metrics are unknown, never zero. Compare languages, sample sets and processing configurations separately.</p></>}
     {tab === 'security' && <><Remote path="/admin/audit" title="Persisted audit events"/><Remote path="/admin/users" title="Users"/><Remote path="/admin/roles" title="Server permissions"/></>}
     {tab === 'api_console' && <ApiConsole meetingId={meetingId}/>}
     {tab === 'system_health' && <HealthDashboard/>}
@@ -198,6 +198,7 @@ function Pipeline({id}: {id: string}) {
   const processingError = currentJob?.status === 'failed' ? currentJob.error : null;
   return <section className={panel}><div className="flex justify-between"><h3 className="font-semibold">ACE / Blackboard execution</h3><button className={secondary} onClick={state.refresh}><RefreshCw size={14}/>Refresh</button></div><ErrorBox error={state.error || processingError}/>
     <p className="text-xs text-slate-400">Observed state: {state.data?.status || 'unknown'} · Canonical transcript: {state.data?.canonical_transcript_id || 'not available'}</p>
+    {state.data?.provenance?.quality_warnings?.map((warning: string, index: number) => <p key={index} role="status" className="text-sm text-amber-300">{warning}</p>)}
     {currentJob && <p className="text-xs text-slate-400">Latest audio attempt: {currentJob.id} · {currentJob.status}. Earlier attempts are retained in history below.</p>}
     {textJob && <p role="status" className="text-sm text-indigo-300">Latest text generation: {textJob.status} · {textJob.id}. Audio attempt history is retained.</p>}
     {textJob?.status === 'failed' && <ErrorBox error={textJob.error}/>}

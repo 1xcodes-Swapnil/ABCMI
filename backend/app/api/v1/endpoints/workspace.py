@@ -47,8 +47,18 @@ async def queue_text_intelligence(meeting_id: uuid.UUID, auth=Depends(verify_aut
     existing = (await db.execute(select(InferenceJob).where(InferenceJob.job_key == key))).scalar_one_or_none()
     if existing:
         if existing.status == "failed":
-            raise HTTPException(409, "This text-generation job failed. Inspect its saved error before retrying.")
-        return {"job_id": str(existing.id), "status": existing.status, "result": existing.result}
+            # Explicit user retries retain the failed attempt and deduplicate
+            # against an active or completed replacement for this fingerprint.
+            replacement = (await db.execute(select(InferenceJob).where(
+                InferenceJob.meeting_id == meeting_id,
+                InferenceJob.job_key.startswith(key + ":retry:"),
+                InferenceJob.status.in_(["queued", "running", "completed"]))
+                .order_by(InferenceJob.created_at.desc()))).scalars().first()
+            if replacement:
+                return {"job_id": str(replacement.id), "status": replacement.status, "result": replacement.result}
+            key += ":retry:" + uuid.uuid4().hex[:16]
+        else:
+            return {"job_id": str(existing.id), "status": existing.status, "result": existing.result}
     job = InferenceJob(id=uuid.uuid4(), job_key=key, kind="intelligence", meeting_id=meeting_id,
         status="queued", payload={"actor": {k: auth[k] for k in ("user_id", "tenant_id", "role", "authenticated")},
         "correlation_id": str(uuid.uuid4()), "canonical_transcript_id": str(canonical.id),
@@ -136,7 +146,8 @@ async def pipeline(meeting_id: uuid.UUID, auth=Depends(verify_authentication), d
                           for task in data.get("ace_tasks", [])], "details_available": True}
     provenance = canonical[0].provenance if canonical else None
     if summary and provenance:
-        provenance = {"execution_mode": provenance.get("execution_mode"), "details_available": True}
+        provenance = {"execution_mode": provenance.get("execution_mode"),
+                      "quality_warnings": provenance.get("quality_warnings", []), "details_available": True}
     return {"meeting_id": str(meeting.id), "status": meeting.status,
             "chunk_progress": chunk_progress,
             "processing_progress": progress,
@@ -201,4 +212,30 @@ async def benchmark_runs(auth=Depends(verify_authentication)):
 async def benchmark_datasets(auth=Depends(verify_authentication)):
     from app.benchmarks.dataset_registry import get_dataset_registry
     return {"items": get_dataset_registry().list_datasets(),
+            "verification": "ADAPTER_CATALOG_ONLY_NOT_EXECUTION_EVIDENCE",
             "execution": "Use the existing benchmark CLI after validating local audio and ground truth; UI does not launch unverified benchmarks."}
+
+
+@router.get("/benchmarks/evidence")
+async def benchmark_evidence(auth=Depends(verify_authentication)):
+    """Bounded, curated metric summaries; never infer tested coverage from adapters."""
+    if auth.get("role") != "admin":
+        raise HTTPException(403, "Administrator access required for host benchmark evidence")
+    import asyncio
+    from app.core.config import get_settings
+    root = Path(get_settings().ABCI_RUNTIME_ROOT or ".runtime")
+    path = root / "research_evidence" / "index.json"
+    def read_summary():
+        if not path.is_file():
+            return {"items": [], "verification": "NO_PUBLISHED_CALCULATED_EVIDENCE",
+                    "note": "Dataset adapters and uploaded meetings do not establish benchmark accuracy."}
+        if path.stat().st_size > 2 * 1024 * 1024:
+            raise HTTPException(503, "Benchmark evidence summary exceeds its bounded size")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            raise HTTPException(503, "Calculated benchmark summary is unavailable")
+        if not isinstance(value, dict) or not isinstance(value.get("items"), list):
+            raise HTTPException(503, "Calculated benchmark summary has invalid schema")
+        return value
+    return await asyncio.to_thread(read_summary)

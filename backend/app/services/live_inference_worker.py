@@ -136,6 +136,10 @@ class LiveInferenceWorker:
         # Dedicated connection/thread also runs while a model blocks Python's
         # async event loop. No credential or URL is written to output.
         url = make_url(self.settings.async_database_url).set(drivername="postgresql+psycopg2")
+        if "ssl" in url.query:
+            query = dict(url.query)
+            query["sslmode"] = query.pop("ssl")
+            url = url.set(query=query)
         engine = create_engine(url, poolclass=NullPool, connect_args={"connect_timeout": 10})
         try:
             while not stop.wait(min(5, self.settings.LIVE_WORKER_LEASE_SECONDS / 3)):
@@ -287,8 +291,18 @@ class LiveInferenceWorker:
             elif not meeting.host_id:
                 raise RuntimeError("Live job has no persisted authorized actor or meeting host")
             # Keep original audio intake and the existing ACE/PyAnnote/SKW pipeline.
-            await service.upload_audio(meeting.id, "live_capture.wav", audio_bytes,
-                sample_rate=rate, channels=1, auth_context=auth)
+            from app.models.audio import Audio
+            saved_audio = (await db.execute(select(Audio).where(Audio.meeting_id == meeting.id)
+                .order_by(Audio.created_at.desc()))).scalars().first()
+            if saved_audio:
+                saved_path = self.resolve_persisted_audio_path(saved_audio.file_path)
+                if (saved_audio.file_name != "live_capture.wav" or not saved_path.is_file()
+                        or hashlib.sha256(saved_path.read_bytes()).digest() != hashlib.sha256(audio_bytes).digest()):
+                    raise RuntimeError("Saved live audio differs from reconstructed chunks; recovery refused")
+            else:
+                await service.upload_audio(meeting.id, "live_capture.wav", audio_bytes,
+                    sample_rate=rate, channels=1, auth_context=auth,
+                    finalization_lease=(job.id, job.lease_token))
             await db.commit()
             ace = get_cli_ace_orchestrator(db)
             async def reuse_actual_moss(payload):
@@ -298,6 +312,8 @@ class LiveInferenceWorker:
                         "segments": [s.model_dump(mode="json") for s in segments],
                         "detected_languages": sorted({s.detected_language for s in segments if s.detected_language}),
                         "metadata": {"is_fixture": False, "model_name": self.settings.OPENMOSS_MODEL_ID,
+                            "declared_languages": list(dict.fromkeys(
+                                [code for code in [meeting.language, *(meeting.secondary_languages or [])] if code])),
                             "chunk_count": len(rows), "source_job_ids": [str(j.id) for _, j in rows],
                             "speaker_mapping": mapping, "deduplicated_segments_count": removed,
                             "deduplication_decisions": processor.last_dedup_decisions,
@@ -440,7 +456,9 @@ class LiveInferenceWorker:
                       "end_ms": s.end_time_ms, "speaker": s.speaker_label} for s in segments]
             if " ".join(s.original_text for s in segments) != canonical.full_text:
                 raise RuntimeError("Saved segments differ from the queued canonical transcript")
-            context = {"turns": turns, "source_segments": [t["segment_id"] for t in turns],
+            context = {"canonical_transcript_id": str(canonical.id),
+                       "source_sha256": job.payload["source_sha256"],
+                       "turns": turns, "source_segments": [t["segment_id"] for t in turns],
                        "source_intervals": [{"start_ms": t["start_ms"], "end_ms": t["end_ms"]} for t in turns]}
             result = await MeetingUnderstandingEngine().analyze_meeting(job.meeting_id, canonical.full_text,
                 context_data=context, correlation_id=job.payload["correlation_id"], use_fixture=False)

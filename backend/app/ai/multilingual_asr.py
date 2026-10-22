@@ -3,7 +3,8 @@ Multilingual Automatic Speech Recognition (ASR) Engine
 Provides ASR capabilities supporting 17 global and regional languages:
 English, Hindi, Tamil, Telugu, Kannada, Malayalam, Bengali, Marathi, Gujarati, Punjabi,
 Chinese, Japanese, French, Spanish, German, Russian, Arabic, and Code-Switched dialects.
-Generates word-level timestamps, language detection confidence, and speaker-attributed text segments.
+Preserves actual model turn timestamps and provisional speaker labels. Word timings,
+language detection and confidence remain absent unless supplied by the selected model.
 """
 
 import os
@@ -294,6 +295,16 @@ class OpenMOSSProvider(ASRProvider):
         """Perform actual Open-MOSS transcription on the provided audio path."""
         # 1. Validate audio first
         audio_metadata = validate_audio(audio_path)
+        from app.ai.speech_frontend import SpeechFrontend
+        # LongAudioProcessor has already analyzed this exact, unchanged chunk.
+        chunk = (options or {}).get("chunk_meta")
+        speech_activity = getattr(chunk, "speech_activity", None)
+        if not speech_activity or (options or {}).get("boundary_context"):
+            speech_activity = SpeechFrontend(get_settings()).analyze(audio_path)
+        if (speech_activity.get("mode") == "filter"
+                and speech_activity.get("status") == "COMPLETED"
+                and speech_activity.get("speech_detected") is False):
+            raise RuntimeError("No neural speech detected in this bounded input; no transcript generated")
         
         # 2. Check dependencies and load model
         try:
@@ -314,6 +325,9 @@ class OpenMOSSProvider(ASRProvider):
         try:
             import time
             from moss_transcribe_diarize.inference_utils import build_transcription_messages, generate_transcription, DEFAULT_PROMPT
+            prompt_policy = (options or {}).get("prompt_policy", get_settings().OPENMOSS_PROMPT_POLICY)
+            if prompt_policy not in {"official_v1", "verbatim_declared_languages_v2"}:
+                raise ValueError("Unsupported explicit MOSS prompt policy")
             base_prompt = DEFAULT_PROMPT + (
                 "\nTranscribe the speech verbatim in its original spoken languages. "
                 "Preserve language switches, names, repetitions and audible words. "
@@ -357,6 +371,8 @@ class OpenMOSSProvider(ASRProvider):
                 base_prompt += (f"\nInput language metadata: {language_name}. "
                     f"Write {language_name} speech using the {script} writing system. "
                     "Preserve any actually spoken language switches. Do not translate.")
+            if prompt_policy == "official_v1":
+                base_prompt = DEFAULT_PROMPT
             language_hint = declared_hints[0] if len(declared_hints) == 1 else None
             messages = build_transcription_messages(audio_path, prompt=base_prompt)
             recover_format = bool((options or {}).get("recover_format"))
@@ -403,7 +419,9 @@ class OpenMOSSProvider(ASRProvider):
                                    "generated_tokens": result["generated_tokens"], "prompt_tokens": result["prompt_len"],
                                    "generation_seconds": time.perf_counter() - started, "device": str(device),
                                    "precision": self.precision,
-                                   "transcription_policy": "verbatim_declared_languages_v2",
+                                   "speech_activity": speech_activity,
+                                   "transcription_policy": prompt_policy,
+                                   "language_hint_applied_to_prompt": prompt_policy != "official_v1" and bool(declared_hints),
                                    "language_hint": language_hint,
                                    "declared_language_hints": declared_hints,
                                    "language_hint_source": "declared_input_metadata" if declared_hints else "NOT AVAILABLE",
@@ -412,6 +430,8 @@ class OpenMOSSProvider(ASRProvider):
                                    "timestamp_boundary_policy": "processor_token_v1"}
             if (options or {}).get("boundary_context"):
                 self.last_inference["boundary_context"] = options["boundary_context"]
+            if (options or {}).get("prompt_recovery_from"):
+                self.last_inference["prompt_recovery_from"] = options["prompt_recovery_from"]
             if recovery:
                 self.last_inference.update(recovery_attempt=("bounded_bounds_beam_v5" if recover_final else "bounded_token_loop_prompt_v4" if recover_loop else "bounded_format_prompt_v3" if recover_format else
                                                "bounded_timestamp_guard_v2" if recover_bounds else "bounded_repetition_guard_v1"),
@@ -428,7 +448,20 @@ class OpenMOSSProvider(ASRProvider):
             
             # Parse decoded_text into ASRSegment formats
             chunk_meta = options.get("chunk_meta") if options else None
-            segments = self._normalize_moss_output(decoded_text, audio_metadata["duration"], chunk_meta)
+            try:
+                segments = self._normalize_moss_output(decoded_text, audio_metadata["duration"], chunk_meta)
+            except ValueError as exc:
+                if (str(exc) in {"MOSS output conflicts with the declared single-language writing script",
+                                  "MOSS output has no timestamped segments; timestamps cannot be fabricated",
+                                  "MOSS generated no structured transcript segments."}
+                        and prompt_policy != "official_v1" and not (options or {}).get("prompt_recovery_from")):
+                    # Re-decode the actual audio once with the native prompt.
+                    # Preserve the first generation; never transliterate/guess it.
+                    previous = {"raw_moss_output": self.last_raw_output, **self.last_inference,
+                                "recovery_reason": str(exc)}
+                    return await self.transcribe(audio_path, {**(options or {}),
+                        "prompt_policy": "official_v1", "prompt_recovery_from": previous})
+                raise
             
             logger.info(
                 "REAL INFERENCE SUCCEEDED: Extracted %d segments from %s",
@@ -508,7 +541,32 @@ class OpenMOSSProvider(ASRProvider):
             excluded = [s for s in segments if s.start_time >= context["owned_duration"]]
             segments = [s for s in segments if s.start_time < context["owned_duration"]]
             self.last_inference["right_context_only_turns"] = [s.model_dump(mode="json") for s in excluded]
+        self._validate_declared_script(segments)
         return segments
+
+    def _validate_declared_script(self, segments):
+        """Validate an explicit single-language writing request, not acoustic LID.
+
+        Auto language and declared code-switching stay unconstrained. Numbers,
+        short names and mixed native/Latin text are not rewritten or discarded.
+        """
+        import unicodedata
+        expected = {"hi": "DEVANAGARI", "mr": "DEVANAGARI", "bn": "BENGALI",
+                    "ta": "TAMIL", "te": "TELUGU", "kn": "KANNADA", "ml": "MALAYALAM",
+                    "gu": "GUJARATI", "pa": "GURMUKHI", "ar": "ARABIC", "ur": "ARABIC"}
+        hints = self.last_inference.get("declared_language_hints", [])
+        script = expected.get(hints[0]) if len(hints) == 1 else None
+        if script is None:
+            return
+        letters = [c for s in segments for c in s.transcript if unicodedata.category(c).startswith("L")]
+        matches = sum(script in unicodedata.name(c, "") for c in letters)
+        conflict = len(letters) >= 8 and matches == 0
+        self.last_inference["writing_script_contract"] = {"declared_script": script,
+            "letter_count": len(letters), "matching_letters": matches,
+            "status": "CONFLICT" if conflict else "NOT_CONFLICTING",
+            "language_identification": "NOT VERIFIED", "transcription_accuracy": "NOT VERIFIED"}
+        if conflict:
+            raise ValueError("MOSS output conflicts with the declared single-language writing script")
 
     @staticmethod
     def _validate_audio_bounds(segments, duration, boundary_resolution=0.0):
@@ -1120,7 +1178,25 @@ class MultilingualASREngine:
                     metadata = validate_audio(audio_file_path)
                     extra = min(settings.AUDIO_CHUNK_OVERLAP_SECONDS, metadata["duration"] - chunk_meta.end_time)
                     if extra <= 0:
-                        raise RuntimeError("No real following audio exists for boundary recovery")
+                        # The last chunk has no right context. Retry the actual
+                        # original audio once with the bounded format contract;
+                        # never pad audio, discard this chunk, or recurse forever.
+                        if generated.get("recovery_attempt") == "bounded_format_prompt_v3":
+                            raise RuntimeError("Bounded original-audio recovery failed at recording end")
+                        if history is not None:
+                            failed_eof = history / f"generation_failed_eof_{chunk_meta.chunk_id}.json"
+                            if not failed_eof.exists():
+                                failed_eof.write_text(json.dumps(generated), encoding="utf-8")
+                            eof_path = history / f"eof_recovery_{chunk_meta.chunk_id}.json"
+                            if not eof_path.exists():
+                                eof_path.write_text(json.dumps({"strategy": "bounded_format_original_audio",
+                                    "chunk_id": str(chunk_meta.chunk_id), "start_time": chunk_meta.start_time,
+                                    "end_time": chunk_meta.end_time, "audio_duration": metadata["duration"],
+                                    "chunk_audio_sha256": chunk_digest}), encoding="utf-8")
+                        recovered = await transcribe_recovery({"chunk_meta": chunk_meta,
+                            "generation_journal": journal_generation, "recover_format": True})
+                        real_provider.last_inference["end_of_recording_recovery"] = "bounded_format_original_audio"
+                        return recovered
                     archive = history / f"generation_failed_{'context_format' if format_retry else 'before_context'}_{chunk_meta.chunk_id}.json"
                     if not archive.exists():
                         archive.write_text(json.dumps(generated), encoding="utf-8")
@@ -1183,6 +1259,15 @@ class MultilingualASREngine:
                     try:
                         return real_provider._normalize_moss_output(generated["raw_moss_output"], chunk_meta.duration, chunk_meta)
                     except ValueError as exc:
+                        if str(exc) == "MOSS output conflicts with the declared single-language writing script":
+                            if generated.get("transcription_policy") == "official_v1" or generated.get("prompt_recovery_from"):
+                                raise
+                            failed_path = history / f"generation_failed_script_{chunk_meta.chunk_id}.json"
+                            if not failed_path.exists():
+                                failed_path.write_text(json.dumps(generated, ensure_ascii=False), encoding="utf-8")
+                            return await transcribe_recovery({"chunk_meta": chunk_meta,
+                                "generation_journal": journal_generation, "prompt_policy": "official_v1",
+                                "prompt_recovery_from": generated})
                         if generated.get("boundary_context"):
                             return await recover_with_context(generated)
                         if (str(exc) == "MOSS generated no structured transcript segments."
@@ -1321,7 +1406,7 @@ class MultilingualASREngine:
             correlation_id=correlation_id,
             cancel_check=cancel_check,
             transcription_context={"declared_languages": declared_languages,
-                                   "policy": "verbatim_declared_languages_v2"},
+                                   "policy": settings.OPENMOSS_PROMPT_POLICY},
         )
 
         recon_result.asr_result.metadata.update(is_fixture=exec_mode != "REAL" or use_fixture,

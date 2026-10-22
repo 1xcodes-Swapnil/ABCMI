@@ -41,6 +41,16 @@ VALID_TRANSITIONS: Dict[str, Set[str]] = {
 SUPPORTED_AUDIO_FORMATS: Set[str] = {"wav", "mp3", "m4a", "flac", "ogg", "webm"}
 
 
+def _saved_audio_sha256(path):
+    """Hash stored upload bytes in bounded reads for durable benchmark identity."""
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 class MeetingService:
     """Domain service managing meeting lifecycle, scope authorization, storage, and ACE orchestration."""
 
@@ -225,6 +235,7 @@ class MeetingService:
         sample_rate: int = 16000,
         channels: int = 1,
         auth_context: Optional[Dict[str, Any]] = None,
+        finalization_lease: Optional[tuple] = None,
     ) -> Audio:
         """Upload and store audio payload for a meeting session."""
         meeting = await self.get_meeting(meeting_id, auth_context)
@@ -233,9 +244,19 @@ class MeetingService:
         from app.models.inference_job import InferenceJob
         await self.db.execute(select(Meeting.id).where(Meeting.id == meeting_id).with_for_update())
         await self.db.refresh(meeting, ["status"])
-        active = await self.db.scalar(select(InferenceJob.id).where(InferenceJob.meeting_id == meeting_id,
-            InferenceJob.status.in_(["queued", "running"])).limit(1))
-        if active or meeting.status in {"running", "processing_requested"}:
+        active_jobs = (await self.db.execute(select(InferenceJob).where(InferenceJob.meeting_id == meeting_id,
+            InferenceJob.status.in_(["queued", "running"])))).scalars().all()
+        own_finalization = False
+        if finalization_lease:
+            from datetime import datetime, timezone
+            job_id, lease_token = finalization_lease
+            own_finalization = bool(len(active_jobs) == 1 and active_jobs[0].id == job_id
+                and active_jobs[0].kind == "finalize" and active_jobs[0].status == "running"
+                and active_jobs[0].lease_token == lease_token and active_jobs[0].lease_until
+                and active_jobs[0].lease_until > datetime.now(timezone.utc))
+            if not own_finalization:
+                raise BadRequestException(message="Live finalization requires its current exclusive job lease", code="INVALID_FINALIZATION_LEASE")
+        if not own_finalization and (active_jobs or meeting.status in {"running", "processing_requested"}):
             raise BadRequestException(message="Finish or cancel processing before uploading another recording", code="AUDIO_IN_PROGRESS")
         transcript = await self.db.scalar(select(TranscriptSegment.id).where(TranscriptSegment.meeting_id == meeting_id).limit(1))
         if transcript or meeting.status in {"completed", "cancelled"}:
@@ -296,6 +317,7 @@ class MeetingService:
         storage_mgr = get_storage_manager()
         import asyncio
         saved_path = await asyncio.to_thread(storage_mgr.save_audio_file, meeting.id, file_name, content)
+        audio_sha256 = await asyncio.to_thread(_saved_audio_sha256, saved_path)
 
         audio = Audio(
             meeting_id=meeting.id,
@@ -307,6 +329,7 @@ class MeetingService:
             sample_rate=sample_rate,
             channels=channels,
             status="uploaded",
+            meta_data={"audio_sha256": audio_sha256, "checksum_scope": "stored_upload_bytes"},
         )
 
         return await self.audio_repo.create(audio)
@@ -351,6 +374,9 @@ class MeetingService:
             correlation_id=req.correlation_id or str(uuid.uuid4()),
             enable_analytics=req.enable_analytics,
             enable_memory=req.enable_memory,
+            target_languages=list(dict.fromkeys(str(code).strip().lower() for code in
+                [meeting.language, *(meeting.secondary_languages or [])]
+                if code and str(code).strip().lower() not in {"auto", "und", "unknown"})),
         )
 
         try:
@@ -406,8 +432,8 @@ class MeetingService:
             )
 
     _required_transcript_stages = frozenset({"audio_intelligence", "multilingual_asr", "speaker_representation",
-        "overlap_resolution", "code_switch_intelligence", "timestamp_intelligence", "transcript_intelligence",
-        "confidence_fusion", "context_intelligence", "verification_engine"})
+        "overlap_resolution", "timestamp_intelligence", "transcript_intelligence",
+        "confidence_fusion", "verification_engine"})
 
     async def recover_verified_audio_transcript(self, job_id):
         """Publish saved REAL audio output; preserve the failed job/meeting state."""
@@ -538,7 +564,9 @@ class MeetingService:
                     "overlap_resolution": overlap,
                     "meeting_processing_status": processing_status,
                     "stage_statuses": [{k: stage[k] for k in ("id", "capability", "status")} for stage in stages],
-                    "quality_warnings": overlap.get("warnings", [])}))
+                    "quality_warnings": list(dict.fromkeys([
+                        *overlap.get("warnings", []),
+                        *asr.get("metadata", {}).get("quality_warnings", [])]))}))
         analytics_output = outputs.get("meeting_analytics")
         if analytics_output is None and publish_speaker_revision:
             from app.repositories.analytics_repo import AnalyticsRepository

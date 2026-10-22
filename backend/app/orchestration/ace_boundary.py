@@ -35,6 +35,7 @@ class ACERequest(CoreBaseModel):
     limit: Optional[int] = Field(default=10, ge=1, le=100, description="Max results to return")
     enable_analytics: bool = Field(default=True, description="Enable meeting analytics phase")
     enable_memory: bool = Field(default=True, description="Enable knowledge memory phase")
+    target_languages: List[str] = Field(default_factory=list, description="Declared meeting languages; not model-detected labels")
 
     @field_validator("correlation_id")
     @classmethod

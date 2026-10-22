@@ -299,6 +299,11 @@ class ACEOrchestrator:
                 correlation_id=correlation_id,
             )
 
+            from app.orchestration.module_contracts import validate_module_result
+            from app.core.config import get_settings
+            output = validate_module_result(output, capability=target_capability,
+                meeting_id=meeting_id, request_id=request_id, task_id=task.task_id,
+                correlation_id=correlation_id, require_json=get_settings().EXECUTION_MODE.upper() == "REAL")
             confidence_score = output.get("confidence_score")
             result_data = output.get("result_data", {})
 

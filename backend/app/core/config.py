@@ -166,6 +166,7 @@ class Settings(BaseSettings):
     OPENMOSS_DEVICE: str = "cpu"  # cpu, cuda, auto
     OPENMOSS_PRECISION: Literal["nf4", "bf16", "dynamic_int8", "fp32"] = "nf4"
     OPENMOSS_MAX_NEW_TOKENS: int = 5120
+    OPENMOSS_PROMPT_POLICY: Literal["official_v1", "verbatim_declared_languages_v2"] = "verbatim_declared_languages_v2"
     OPENMOSS_CACHE_DIR: Optional[str] = None
     SARVAM_QUANTIZED_MODEL_PATH: Optional[str] = None
 
@@ -192,6 +193,19 @@ class Settings(BaseSettings):
     AUDIO_CHUNK_THRESHOLD_SECONDS: float = Field(default=8.0, gt=0)
     AUDIO_CHUNK_CONCURRENCY: int = Field(default=1, ge=1)
     AUDIO_CHUNK_STATE_DIR: Optional[str] = None
+    # Explicit opt-in until a local neural artifact and false-negative rate are validated.
+    AUDIO_VAD_MODE: Literal["off", "observe", "filter"] = "off"
+    AUDIO_VAD_MODEL_PATH: Optional[str] = None
+    AUDIO_VAD_THRESHOLD: float = Field(default=0.5, gt=0, lt=1)
+    AUDIO_VAD_COLLAR_SECONDS: float = Field(default=0.25, ge=0, le=2)
+
+    @field_validator("AUDIO_VAD_MODEL_PATH", mode="before")
+    @classmethod
+    def resolve_vad_model_path(cls, value):
+        if value is None or not str(value).strip():
+            return None
+        path = Path(value).expanduser()
+        return str((path if path.is_absolute() else _BACKEND_ROOT.parent / path).resolve())
     PYANNOTE_WINDOW_SECONDS: float = Field(default=30.0, ge=30.0)
     PYANNOTE_WINDOW_OVERLAP_SECONDS: float = Field(default=5.0, gt=0)
     PYANNOTE_SPEAKER_MATCH_THRESHOLD: float = Field(default=0.75, gt=0, lt=1)

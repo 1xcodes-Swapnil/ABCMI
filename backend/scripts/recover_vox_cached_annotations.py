@@ -4,13 +4,26 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import argparse
 import pyarrow.parquet as pq
 import soundfile as sf
 
 ROOT = Path(__file__).resolve().parents[2]
 local = ROOT / "data/benchmarks/voxconverse"
 cache = Path("F:/hf-cache/hub/datasets--diarizers-community--voxconverse")
-files = sorted(local.glob("audio/test/*.wav"), key=lambda p: (sf.info(p).duration, p.name))[:10]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--audio', action='append', help='Existing test WAV basename; repeat for saved runs requiring annotation')
+parser.add_argument('--max-annotation-tail-seconds', type=float, default=0.02,
+                    help='Maximum accepted annotation tail beyond audio; original times preserved, scoring requires audio UEM')
+args = parser.parse_args()
+if not 0 <= args.max_annotation_tail_seconds <= 0.1: parser.error('Tail tolerance must be within 0–0.1 seconds')
+if args.audio:
+    if any(Path(name).name != name or not name.endswith('.wav') for name in args.audio):
+        parser.error('Use test WAV basenames only')
+    files = [local / 'audio/test' / name for name in sorted(set(args.audio))]
+    if any(not p.is_file() for p in files): parser.error('Requested real audio is missing')
+else:
+    files = sorted(local.glob("audio/test/*.wav"), key=lambda p: (sf.info(p).duration, p.name))[:10]
 targets = {}
 for path in files:
     info = sf.info(path)
@@ -34,7 +47,7 @@ for shard in sorted(cache.glob("snapshots/**/test-*.parquet")):
             starts, ends, speakers = row["timestamps_start"], row["timestamps_end"], row["speakers"]
             if not starts or not len(starts) == len(ends) == len(speakers):
                 raise RuntimeError("Matched cached sample has invalid annotation arrays")
-            if any(not 0 <= start <= end <= info.duration + 0.02 for start, end in zip(starts, ends)):
+            if any(not 0 <= start < end <= info.duration + args.max_annotation_tail_seconds for start, end in zip(starts, ends)):
                 raise RuntimeError("Cached annotation exceeds matched audio")
             path = target["path"]
             rttm = output / (path.stem + ".rttm")
@@ -47,12 +60,14 @@ for shard in sorted(cache.glob("snapshots/**/test-*.parquet")):
             recovered.append({"local_audio": str(path.relative_to(ROOT)), "duration": info.duration,
                 "sample_rate": rate, "waveform_sha256": digest, "cache_shard": str(shard), "cache_row": index,
                 "cached_audio_path": row["audio"].get("path"), "annotation_turns": len(starts),
+                "annotation_tail_seconds": max(0.0, max(ends)-info.duration),
+                "timestamps_modified": False, "required_scoring_uem": [0.0, info.duration],
                 "rttm": str(rttm.relative_to(ROOT)), "rttm_sha256": hashlib.sha256(text.encode()).hexdigest()})
             del targets[path.name]
     if not targets: break
 evidence = ROOT / "e2e_validation/diagnostics" / ("vox_annotation_recovery_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".json")
 record = {"timestamp": datetime.now(timezone.utc).isoformat(), "status": "VERIFIED" if not targets else "PARTIAL",
     "recovered": recovered, "unmatched": list(targets), "downloads": False, "inference": False,
-    "original_empty_rttm_preserved": True, "selection": "10 shortest measured existing test recordings"}
+    "original_empty_rttm_preserved": True, "selection": "explicit saved-run audio basenames" if args.audio else "10 shortest measured existing test recordings"}
 with evidence.open("x", encoding="utf-8") as handle: json.dump(record, handle, indent=2)
 print(json.dumps({"status": record["status"], "recovered": len(recovered), "unmatched": len(targets), "artifact": str(evidence.relative_to(ROOT))}))

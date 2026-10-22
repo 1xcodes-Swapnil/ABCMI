@@ -25,27 +25,42 @@ export function RealLiveWorkspace({embedded}: {key?:string; embedded?: {token:st
   const [error, setError] = useState(''), [recording, setRecording] = useState(false);
   const [connected, setConnected] = useState(false), [queued, setQueued] = useState(0);
   const [busy, setBusy] = useState(false), [finalTranscript, setFinalTranscript] = useState('');
+  const [uploading, setUploading] = useState(false), [stopping, setStopping] = useState(false);
+  const [endingRequested, setEndingRequested] = useState(false), [finalizing, setFinalizing] = useState(false);
   const capture = useRef<{ctx: AudioContext; stream: MediaStream; node: AudioWorkletNode; source: MediaStreamAudioSourceNode} | null>(null);
   const samples = useRef(new Float32Array(0)), offset = useRef(0), sequence = useRef(0);
   const pending = useRef<Pending[]>([]), sending = useRef(false), ending = useRef(false);
   const flushing = useRef<(() => void) | null>(null);
   const statusRef = useRef<LiveStatus | null>(null);
+  const finalizeSending = useRef(false), drainRef = useRef<(() => Promise<void>) | null>(null);
+  const retry = useRef({allowed:false, attempts:0, after:0});
+
+  function requestEnding(value: boolean) {ending.current = value; setEndingRequested(value);}
 
   useEffect(() => {
-    window.dispatchEvent(new CustomEvent('abci:live-pending', {detail:recording || queued > 0 || ending.current}));
-  }, [recording, queued, status]);
+    // Only browser-owned unsaved audio blocks navigation. Server processing and
+    // a failed stop request remain recoverable after every upload is accepted.
+    window.dispatchEvent(new CustomEvent('abci:live-pending', {
+      detail:recording || queued > 0 || !!capture.current || samples.current.length > 0,
+    }));
+  }, [recording, queued, stopping, endingRequested, finalizing, status]);
   useEffect(() => () => {window.dispatchEvent(new CustomEvent('abci:live-pending', {detail:false}));}, []);
   async function api(path: string, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
     headers.set('Authorization', `Bearer ${token}`);
     if (tenant) headers.set('X-Tenant-ID', tenant);
-    const response = await fetch(base.replace(/\/$/, '') + path, {...init, headers});
-    const payload = await response.json();
-    if (!response.ok) {
-      const err = new Error(payload?.error?.message || payload?.detail || payload?.message || `HTTP ${response.status}`);
-      Object.assign(err, {status: response.status}); throw err;
-    }
-    return payload;
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 30000);
+    try {
+      const response = await fetch(base.replace(/\/$/, '') + path, {...init, headers, signal:controller.signal});
+      const payload = await response.json();
+      if (!response.ok) {
+        const err = new Error(payload?.error?.message || payload?.detail || payload?.message || `HTTP ${response.status}`);
+        const wait = Number(response.headers.get('Retry-After'));
+        Object.assign(err, {status: response.status, retryAfterMs:Number.isFinite(wait) && wait > 0 ? Math.min(60000, wait*1000) : 5000});
+        throw err;
+      }
+      return payload;
+    } finally {clearTimeout(timeout);}
   }
   const livePath = `/meetings/${meeting}/live`;
   async function refresh() {
@@ -54,9 +69,31 @@ export function RealLiveWorkspace({embedded}: {key?:string; embedded?: {token:st
   }
   useEffect(() => {
     if (!connected) return;
-    let mounted = true;
-    const timer = setInterval(() => {refresh().catch(e => {if (mounted) setError(String(e.message));});}, 2000);
-    return () => {mounted = false; clearInterval(timer);};
+    let mounted = true, timer:ReturnType<typeof setTimeout>, delay = 2000;
+    let previousPending: number | null = null;
+    async function poll() {
+      let terminal = false;
+      try {
+        const next = await refresh();
+        if (!mounted) return;
+        delay = 2000;
+        const progressed = previousPending !== null && next.pending_jobs < previousPending;
+        previousPending = next.pending_jobs;
+        // A full queue is not a lost recording. Retry the SAME checksummed
+        // sequence only after worker progress, bounded to six automatic tries.
+        if (!capture.current && (pending.current.length || ending.current) && retry.current.allowed &&
+            retry.current.attempts < 6 && Date.now() >= retry.current.after &&
+            (progressed || next.pending_jobs === 0)) {
+          retry.current.attempts++;
+          await drainRef.current?.();
+        }
+        terminal = ['completed','failed','cancelled'].includes(next.session.status) &&
+          !pending.current.length && !capture.current && !ending.current;
+      } catch (e) {if (mounted) {setError((e as Error).message); delay = Math.min(15000, delay*2);}}
+      if (mounted && !terminal) timer = setTimeout(poll, delay);
+    }
+    timer = setTimeout(poll, 2000);
+    return () => {mounted = false; clearTimeout(timer);};
   }, [connected, meeting, base, token, tenant]);
   useEffect(() => () => {
     capture.current?.stream.getTracks().forEach(t => t.stop());
@@ -64,7 +101,7 @@ export function RealLiveWorkspace({embedded}: {key?:string; embedded?: {token:st
   }, []);
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (capture.current || pending.current.length || ending.current) {event.preventDefault(); event.returnValue = '';}
+      if (capture.current || pending.current.length || samples.current.length) {event.preventDefault(); event.returnValue = '';}
     };
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
@@ -82,15 +119,23 @@ export function RealLiveWorkspace({embedded}: {key?:string; embedded?: {token:st
     } catch (e) {setError((e as Error).message);} finally {setBusy(false);}
   }
   async function finishWhenUploaded() {
-    if (ending.current && !pending.current.length && !sending.current) {
-      await api(`${livePath}/stop`, {method: 'POST'});
-      ending.current = false;
-      await refresh();
+    if (ending.current && !capture.current && !pending.current.length && !sending.current && !finalizeSending.current) {
+      finalizeSending.current = true; setFinalizing(true);
+      try {
+        await api(`${livePath}/stop`, {method: 'POST'});
+        requestEnding(false); retry.current.allowed = false;
+        await refresh();
+      } catch (e) {
+        const failure = e as Error & {status?:number; retryAfterMs?:number};
+        retry.current.allowed = !failure.status || [408,429,502,503,504].includes(failure.status);
+        retry.current.after = Date.now() + (failure.retryAfterMs || 5000);
+        throw e;
+      } finally {finalizeSending.current = false; setFinalizing(false);}
     }
   }
   async function drain() {
     if (sending.current) return;
-    sending.current = true;
+    sending.current = true; setUploading(true);
     try {
       while (pending.current.length) {
         const chunk = pending.current[0], form = new FormData();
@@ -100,12 +145,16 @@ export function RealLiveWorkspace({embedded}: {key?:string; embedded?: {token:st
         form.set('timestamp_end_ms', String(chunk.end)); form.set('file', new Blob([chunk.wav], {type:'audio/wav'}), 'chunk.wav');
         await api(`${livePath}/chunks`, {method:'POST', body:form});
         pending.current.shift(); setQueued(pending.current.length);
+        retry.current.attempts = 0;
       }
       setError('');
     } catch (e) {
+      const failure = e as Error & {status?:number; retryAfterMs?:number};
+      retry.current.allowed = !failure.status || [408,429,502,503,504].includes(failure.status);
+      retry.current.after = Date.now() + (failure.retryAfterMs || 5000);
       setError(`${(e as Error).message}. Audio remains in this tab; stop capture and retry pending uploads.`);
       if (capture.current) await stopCapture(false);
-    } finally {sending.current = false;}
+    } finally {sending.current = false; setUploading(false);}
     await finishWhenUploaded();
   }
   function enqueue(data: Float32Array, rate: number) {
@@ -129,7 +178,7 @@ export function RealLiveWorkspace({embedded}: {key?:string; embedded?: {token:st
         const config = await refresh();
         const windowFrames = Math.round(config.chunk_seconds*ctx.sampleRate);
         const stepFrames = Math.round((config.chunk_seconds-config.overlap_seconds)*ctx.sampleRate);
-        samples.current = new Float32Array(0); offset.current = 0; sequence.current = 0; ending.current = false;
+        samples.current = new Float32Array(0); offset.current = 0; sequence.current = 0; requestEnding(false);
         node.port.onmessage = event => {
           if (event.data === 'flushed') {flushing.current?.(); flushing.current = null; return;}
           const next = new Float32Array(samples.current.length+event.data.length);
@@ -141,7 +190,7 @@ export function RealLiveWorkspace({embedded}: {key?:string; embedded?: {token:st
           }
           if (pending.current.length >= 6 && !flushing.current) {
             setError('Capture stopped because inference/uploads cannot keep up. Pending audio is retained in this tab.');
-            void stopCapture(false);
+            void stopCapture(false).catch(e => setError((e as Error).message));
           }
         };
         source.connect(node); const mute = ctx.createGain(); mute.gain.value = 0;
@@ -151,22 +200,35 @@ export function RealLiveWorkspace({embedded}: {key?:string; embedded?: {token:st
   }
   async function stopCapture(send = true) {
     const active = capture.current;
-    if (!active || flushing.current) return;
-    setRecording(false); ending.current = true;
+    if (flushing.current) return;
+    if (!active) {requestEnding(true); if (send) await drain(); return;}
+    setRecording(false); setStopping(true); requestEnding(true);
     active.source.disconnect(); active.stream.getTracks().forEach(t => t.stop());
-    await new Promise<void>(resolve => {flushing.current = resolve; active.node.port.postMessage('flush');});
-    await active.ctx.close(); capture.current = null;
-    const overlap = Math.round((statusRef.current?.overlap_seconds || 0)*active.ctx.sampleRate);
-    if (samples.current.length > (sequence.current ? overlap : 0)) enqueue(samples.current, active.ctx.sampleRate);
-    samples.current = new Float32Array(0);
+    try {
+      await new Promise<void>((resolve,reject) => {
+        const deadline = setTimeout(() => {flushing.current = null; reject(new Error('Microphone tail flush was not confirmed. Keep this tab open and retry Stop and finalize.'));}, 5000);
+        flushing.current = () => {clearTimeout(deadline); resolve();}; active.node.port.postMessage('flush');
+      });
+      await active.ctx.close(); capture.current = null;
+      const overlap = Math.round((statusRef.current?.overlap_seconds || 0)*active.ctx.sampleRate);
+      if (samples.current.length > (sequence.current ? overlap : 0)) enqueue(samples.current, active.ctx.sampleRate);
+      samples.current = new Float32Array(0);
+    } finally {setStopping(false);}
     if (send) await drain();
   }
+  async function retryPending() {
+    retry.current = {allowed:true,attempts:0,after:0};
+    if (capture.current && !recording) await stopCapture(); else await drain();
+  }
+  drainRef.current = drain;
   async function readTranscript() {
     try {setFinalTranscript(JSON.stringify(await api(`/meetings/${meeting}/transcript`), null, 2));}
     catch (e) {setError((e as Error).message);}
   }
   const captions = (status?.jobs || []).filter(j => j.kind === 'chunk' && j.status === 'completed');
   const locked = connected || recording || queued > 0;
+  const canFinalize = recording || !!capture.current || queued > 0 || endingRequested ||
+    ['live','paused'].includes(status?.session.status || '');
   return <main className={embedded ? 'text-slate-100' : 'min-h-screen bg-slate-950 text-slate-100 p-6 md:p-10'}>
     <div className="max-w-5xl mx-auto space-y-6">
       <header><p className="text-cyan-400 text-sm">ABCI-MI · REAL execution</p><h1 className="text-3xl font-semibold mt-2">Live meeting workspace</h1>
@@ -187,10 +249,13 @@ export function RealLiveWorkspace({embedded}: {key?:string; embedded?: {token:st
         <div className="flex flex-wrap gap-4"><span>Session: {status?.session.status}</span><span>Worker backlog: {status?.pending_jobs ?? 'unknown'}</span><span>Failed jobs: {status?.failed_jobs ?? 'unknown'}</span><span>Unsent chunks: {queued}</span></div>
         <div className="flex flex-wrap gap-3">
           <button className="bg-cyan-700 p-3 rounded disabled:opacity-40" disabled={busy || recording || status?.session.status !== 'created'} onClick={startCapture}>Start microphone</button>
-          <button className="bg-slate-700 p-3 rounded disabled:opacity-40" disabled={!recording} onClick={()=>stopCapture().catch(e=>setError(e.message))}>Stop and finalize</button>
-          <button className="bg-slate-700 p-3 rounded disabled:opacity-40" disabled={recording || (!queued && !ending.current)} onClick={()=>drain().catch(e=>setError(e.message))}>Retry pending uploads</button>
+          <button className="bg-slate-700 p-3 rounded disabled:opacity-40" disabled={busy || stopping || finalizing || !canFinalize} onClick={()=>stopCapture().catch(e=>setError(e.message))}>{stopping ? 'Saving microphone tail…' : finalizing ? 'Requesting finalization…' : 'Stop and finalize'}</button>
+          <button className="bg-slate-700 p-3 rounded disabled:opacity-40" disabled={recording || uploading || stopping || finalizing || (!queued && !endingRequested)} onClick={()=>retryPending().catch(e=>setError(e.message))}>{uploading ? 'Uploading saved audio…' : 'Retry pending uploads'}</button>
+          <button className="bg-slate-700 p-3 rounded disabled:opacity-40" disabled={busy} onClick={()=>refresh().catch(e=>setError(e.message))}>Refresh worker status</button>
           <button className="bg-slate-700 p-3 rounded disabled:opacity-40" disabled={status?.session.status !== 'completed'} onClick={readTranscript}>Read persisted transcript</button>
         </div><p className="text-sm text-slate-400">Capture window {status?.chunk_seconds}s · overlap {status?.overlap_seconds}s. Overlapping preview captions may repeat; labels are local to each chunk until finalization.</p>
+        {queued > 0 && <p role="status" className="text-sm text-amber-200">Keep this tab open: {queued} chunk(s) are still held in browser memory. Upload retries follow worker progress, up to six automatic attempts; Retry pending uploads remains available.</p>}
+        {!recording && !queued && !capture.current && status?.pending_jobs ? <p role="status" className="text-sm text-slate-300">Uploaded audio is saved on the server. {status.pending_jobs} job(s) remain queued or running. You may navigate after all browser audio is uploaded; keep the GPU instance running.</p> : null}
       </section>}
       <section className="space-y-3"><h2 className="text-xl">Observed captions</h2>
         {!captions.length && <p className="text-slate-400">No real transcript has been returned yet.</p>}

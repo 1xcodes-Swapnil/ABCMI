@@ -44,6 +44,7 @@ def execution_identity(settings) -> Dict[str, Any]:
     from app.ai.model_inventory import configure_cache, snapshot_for
     from app.ai.asr_selection import batch_asr_identity
     selected = batch_asr_identity(settings)
+    from app.ai.speech_frontend import speech_frontend_identity
     versions = {}
     for package in ("torch", "transformers", "moss-transcribe-diarize", "bitsandbytes", "pyannote.audio"):
         try:
@@ -52,13 +53,13 @@ def execution_identity(settings) -> Dict[str, Any]:
             versions[package] = "NOT AVAILABLE"
     snapshot = snapshot_for(selected["model_id"], configure_cache())
     sources = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-               for name in ("multilingual_asr.py", "long_audio_processor.py", "speaker_diarization.py", "audio_reader.py")}
+               for name in ("multilingual_asr.py", "long_audio_processor.py", "speaker_diarization.py", "audio_reader.py", "speech_frontend.py")}
     if selected["provider"] == "whisper":
         for name in ("whisper_provider.py", "asr_selection.py"):
             sources[name] = hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
     return {"schema": 1, "model_revision": snapshot.name if snapshot else "NOT AVAILABLE",
             "device": settings.OPENMOSS_DEVICE, "precision": selected["precision"],
-            "batch_provider": selected,
+            "batch_provider": selected, "speech_frontend": speech_frontend_identity(settings),
             "max_new_tokens": 440 if selected["provider"] == "whisper" else settings.OPENMOSS_MAX_NEW_TOKENS, "do_sample": False,
             "pyannote_window": settings.PYANNOTE_WINDOW_SECONDS,
             "pyannote_overlap": settings.PYANNOTE_WINDOW_OVERLAP_SECONDS,
@@ -80,6 +81,7 @@ class ChunkMetadata(CoreBaseModel):
     retry_count: int = Field(default=0, ge=0)
     error_message: Optional[str] = None
     processed_at: Optional[datetime] = None
+    speech_activity: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ChunkProcessingState(CoreBaseModel):
@@ -466,6 +468,12 @@ class LongAudioProcessor:
     @classmethod
     def _same_observed_turn(cls, left, right) -> bool:
         """Only deduplicate text that also describes the same temporal event."""
+        # Equal unknown buckets do not establish that two observations belong
+        # to the same person. Preserve ambiguous boundary text for review.
+        unknown = {"", "UNRESOLVED", "SPEAKER_UNKNOWN", "UNKNOWN"}
+        if any(speaker is None or str(speaker).strip().upper() in unknown
+               for speaker in (left.speaker_id, right.speaker_id)):
+            return False
         if left.speaker_id != right.speaker_id:
             return False
         intersection = min(left.end_time, right.end_time) - max(left.start_time, right.start_time)
@@ -563,12 +571,18 @@ class LongAudioProcessor:
                                 "start_time": seg.start_time, "end_time": seg.end_time})
                             break
                     if not is_duplicate:
+                        previous_end = last_kept_time
+                        uncertain_matches = [p for p in kept_prev
+                            if p.speaker_id == seg.speaker_id
+                            and min(p.end_time, seg.end_time) > max(p.start_time, seg.start_time)]
                         kept_curr.append(seg)
                         last_kept_time = max(last_kept_time, seg.end_time)
                         self.last_dedup_decisions.append({"segment_id": str(seg.segment_id),
                             "chunk_index": idx, "decision": "retained_without_verified_duplicate",
                             "start_time": seg.start_time, "end_time": seg.end_time,
-                            "previous_end_time": last_kept_time,
+                            "previous_end_time": previous_end,
+                            "overlapping_segment_ids": [str(p.segment_id) for p in uncertain_matches],
+                            "requires_boundary_review": bool(uncertain_matches),
                             "duplicate_verified": False})
                 else:
                     # Beyond overlap region: unconditionally keep
@@ -714,6 +728,8 @@ class LongAudioProcessor:
 
         chunk_results: List[Tuple[ChunkMetadata, List[ASRSegment]]] = []
         temp_chunk_files: List[str] = []
+        from app.ai.speech_frontend import SpeechFrontend
+        frontend = SpeechFrontend(settings) if settings.EXECUTION_MODE.upper() == "REAL" else None
 
         try:
             # 2. Process chunks sequentially or with bounded concurrency
@@ -750,7 +766,23 @@ class LongAudioProcessor:
 
                 try:
                     # Execute transcription callback
-                    raw_segments = await transcribe_chunk_func(chunk_audio_path, chunk_meta)
+                    if frontend is not None:
+                        chunk_meta.speech_activity = frontend.analyze(chunk_audio_path)
+                        if chunk_meta.speech_activity.get("status") == "COMPLETED":
+                            chunk_meta.speech_activity["global_speech_intervals"] = [
+                                {"start": chunk_meta.start_time + interval["start"],
+                                 "end": chunk_meta.start_time + interval["end"]}
+                                for interval in chunk_meta.speech_activity["speech_intervals"]]
+                        save_state()  # Preserve the actual decision before ASR or a crash.
+                    skip_no_speech = (settings.EXECUTION_MODE.upper() == "REAL"
+                                      and settings.AUDIO_VAD_MODE == "filter"
+                                      and chunk_meta.speech_activity.get("status") == "COMPLETED"
+                                      and chunk_meta.speech_activity.get("speech_detected") is False)
+                    if skip_no_speech:
+                        chunk_meta.speech_activity["decision"] = "skipped_no_neural_speech"
+                        raw_segments = []
+                    else:
+                        raw_segments = await transcribe_chunk_func(chunk_audio_path, chunk_meta)
                     if isinstance(raw_segments, ASRResult):
                         local_segments = raw_segments.segments
                     elif isinstance(raw_segments, list):
@@ -780,6 +812,7 @@ class LongAudioProcessor:
                             "chunk_index": idx,
                             "total_chunks": state.total_chunks,
                             "segments_extracted": len(global_segments),
+                            "speech_activity": chunk_meta.speech_activity,
                             "progress_percentage": round((state.completed_chunks_count / state.total_chunks) * 100, 1),
                             "correlation_id": corr_id,
                         },
@@ -852,6 +885,8 @@ class LongAudioProcessor:
                     "overlap_duration_seconds": self.overlap_duration,
                     "deduplicated_segments_count": dedup_count,
                     "deduplication_decisions": self.last_dedup_decisions,
+                    "quality_warnings": (["Unresolved overlapping chunk hypotheses remain. Review boundary text; no cross-script equivalence or word deletion was assumed."]
+                        if any(d.get("requires_boundary_review") for d in self.last_dedup_decisions) else []),
                     "global_speakers": sorted(list(set(global_spk_map.values()))),
                     "provenance": "ASR:ChunkedLongAudioProcessor",
                     "chunks": [chunk.model_dump(mode="json") for chunk in state.chunks],
